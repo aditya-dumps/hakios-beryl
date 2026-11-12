@@ -41,7 +41,15 @@
 * **Touchscreen**:
   * Controller: FocalTech FTS over I2C (`i2c@11ed0000`, chip addr `0x38`).
 
-## 3. Host Toolchain
+## 3. Boot Image & Kernel Packaging (AOSP v4 / MT6855)
+* **Boot Image Version**: Android Boot Image Header Version 4 (`hver == 4`).
+* **Header Size**: 1584 bytes (aligned to 4096-byte page boundary).
+* **Kernel Size in stock_boot_a**: 19,790,630 bytes.
+* **Kernel Compression**: LZ4 legacy format (`0x184c2102` magic). Decompresses to 42,387,968 bytes uncompressed ARM64 Linux Image.
+* **LK Decompression**: MediaTek LK supports both `gunzip` and `unlz4`.
+* **Chainboot Requirements**: `tools/chainboot.py` must support header v4 and unpack LZ4 legacy / gzip.
+
+## 4. Host Toolchain
 * Clang 20: `/home/aditya/crDroid/prebuilts/clang/host/linux-x86/clang-r547379/bin/clang`
 * LLD: `/home/aditya/crDroid/prebuilts/clang/host/linux-x86/clang-r547379/bin/ld.lld`
 * DTC: `/home/aditya/crDroid/prebuilts/misc/linux-x86/dtc/dtc`
