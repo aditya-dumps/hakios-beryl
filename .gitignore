@@ -1,0 +1,23 @@
+# Device images & dumps (must never be committed)
+*.img
+*.bin
+*.dtb
+*.dts
+fdt.*
+stock_*
+
+# Firmware fetch dirs
+fw-*/
+
+# Cloned reference repositories (submodules or local clones)
+/hakios/
+/hakios-mt6768/
+/hakios-uefi/
+/hakios-metal/
+
+# Temporary and build artifacts
+build/
+out/
+*.o
+*.elf
+*.log
