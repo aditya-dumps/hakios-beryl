@@ -4,15 +4,15 @@ Copy this file, fill the marked fields, and hand it to an agent that has never s
 project. Everything the agent needs is named here; it should not have to guess.
 0. Fill these in before handing this over
 field	value
-phone model / codename	Redmi note 14 5g
-SoC	MT6885
-SoC generation	MTK 7025 ULTRA
-RAM	8
-storage	GET BY ADB
-GPU	GET BY ADB
-bootloader unlocked?	 yes
+phone model / codename	Redmi Note 14 5G (beryl)
+SoC	MT6855
+SoC generation	Dimensity 7025 Ultra
+RAM	8 GB LPDDR4X
+storage	256 GB UFS 2.2 (Samsung KM8F9001JM-B813)
+GPU	Imagination PowerVR BXM-8-256 (Rogue RGX)
+bootloader unlocked?	yes
 root available on Android?	yes
-adb serial	<from `adb devices`>
+adb serial	$HAKIOS_SERIAL
 1. What you are doing
 
 You are bringing Apple's open XNU kernel (xnu-8796.121.2) and an unmodified iOS 16.5 user
