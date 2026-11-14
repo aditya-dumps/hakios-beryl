@@ -2069,7 +2069,11 @@ static void hw_probes(void)
 		/* 3. Check LBA 8 (misc partition) for USB trigger: "boot-xnu" or "boot-ios" */
 		static const uint8_t read_misc[10] = { 0x28, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
 		RUN_SCSI("READ(10)_MISC", 2, read_misc, 10, ufs_buf, 4096, 1);
-		if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
+		if (memcmp(ufs_buf, "boot-ios-always", 15) == 0) {
+			out("UFS: >>> PERSISTENT IOS TRIGGER FOUND IN MISC! <<<\n");
+			s_usb_xnu_trigger = 2;
+			out("UFS: Persistent trigger kept in misc (boots iOS every time).\n");
+		} else if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
 			out("UFS: >>> INTERACTIVE IOS TRIGGER FOUND IN MISC! <<<\n");
 			s_usb_xnu_trigger = 2;
 			memset(ufs_buf, 0, 4096);
