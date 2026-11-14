@@ -2227,22 +2227,22 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 
 	if (s.vcputc_options) {
-		static const uint32_t direct_vcputc_code[48] = {
-			0x7100005fu, 0x1a801042u, 0x12001c42u, 0x34000582u,
-			0x7100345fu, 0x54000540u, 0xa9be7bfdu, 0xa90153f3u,
-			0x910003fdu, 0x2a0203f3u, 0x2a1303e0u, 0x94013128u,
-			0xd0003b28u, 0xf947fd08u, 0xb40003e8u, 0x71002a7fu,
-			0x540000a0u, 0x90004a68u, 0xb94c1900u, 0x7102081fu,
-			0x54000183u, 0x90004a68u, 0xb90c191fu, 0x90004a69u,
-			0xb94c1d21u, 0x11000421u, 0x7102443fu, 0x54000043u,
-			0x528001e1u, 0xb90c1d21u, 0x71002a7fu, 0x540001c0u,
-			0x90004a68u, 0xb94c1900u, 0x90004a69u, 0xb94c1d21u,
-			0x2a1303e2u, 0x52800003u, 0x52800004u, 0x52800005u,
-			0x94000ae7u, 0x90004a68u, 0xb94c1900u, 0x11000400u,
-			0xb90c1900u, 0xa94153f3u, 0xa8c27bfdu, 0xd65f03c0u
+		static const uint32_t direct_vcputc_code[46] = {
+			0x12001c02u, 0x34000582u, 0x7100345fu, 0x54000540u,
+			0xa9be7bfdu, 0xa90153f3u, 0x910003fdu, 0x2a0203f3u,
+			0x2a1303e0u, 0x9401312au, 0xd0003b28u, 0xf947fd08u,
+			0xb40003e8u, 0x71002a7fu, 0x540000a0u, 0x90004a68u,
+			0xb94c1900u, 0x7102081fu, 0x54000183u, 0x90004a68u,
+			0xb90c191fu, 0x90004a69u, 0xb94c1d21u, 0x11000421u,
+			0x7102443fu, 0x54000043u, 0x52800001u, 0xb90c1d21u,
+			0x71002a7fu, 0x540001c0u, 0x90004a68u, 0xb94c1900u,
+			0x90004a69u, 0xb94c1d21u, 0x2a1303e2u, 0x52800003u,
+			0x52800004u, 0x52800005u, 0x94000ae9u, 0x90004a68u,
+			0xb94c1900u, 0x11000400u, 0xb90c1900u, 0xa94153f3u,
+			0xa8c27bfdu, 0xd65f03c0u
 		};
 		volatile uint32_t *vcp = (volatile uint32_t *)kva_to_pa(s.vcputc_options);
-		for (int i = 0; i < 48; i++) {
+		for (int i = 0; i < 46; i++) {
 			vcp[i] = direct_vcputc_code[i];
 		}
 		out("vcputc_options: direct framebuffer renderer installed\n");
@@ -2252,7 +2252,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		*(volatile uint32_t *)kva_to_pa(s.gc_x) = 0;
 	}
 	if (s.gc_y) {
-		*(volatile uint32_t *)kva_to_pa(s.gc_y) = 15;
+		*(volatile uint32_t *)kva_to_pa(s.gc_y) = 0;
 	}
 	if (s.gc_enable) {
 		volatile uint32_t *gce = (volatile uint32_t *)kva_to_pa(s.gc_enable);
@@ -2407,6 +2407,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
+
+	/* Clear framebuffer so Darwin XNU starts on a fresh, clean AMOLED canvas */
+	if (interactive) {
+		memset((void *)LK_FB_BASE, 0, FB_SCREEN_SIZE);
+		dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	}
 
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
 	__builtin_unreachable();
