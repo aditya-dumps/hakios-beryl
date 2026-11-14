@@ -2422,7 +2422,13 @@ void mtkloader_main(uint64_t dtb)
 	int xnu = 0;
 	int interactive = 0;
 
-	if (s_usb_xnu_trigger) {
+	if (s_usb_xnu_trigger == 2) {
+		fbc.fg = 0xff00ff00u; /* GREEN */
+		out("\n[+] INTERACTIVE IOS TRIGGER in misc! Booting iOS / Darwin...\n");
+		fbc.fg = 0xffffffffu;
+		xnu = 1;
+		interactive = 1;
+	} else if (s_usb_xnu_trigger == 1) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
 		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / XNU (automated test)...\n");
 		fbc.fg = 0xffffffffu;
