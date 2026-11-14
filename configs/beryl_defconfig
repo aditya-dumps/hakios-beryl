@@ -1,0 +1,4 @@
+# HakiOS defconfig for Redmi Note 14 5G (beryl, MediaTek MT6855)
+# What tools/xnu-cycle.sh runs: make beryl_defconfig && make kernel
+#include common_defconfig
+#include beryl.config

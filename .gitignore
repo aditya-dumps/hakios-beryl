@@ -6,6 +6,11 @@
 fdt.*
 stock_*
 
+# Root temporary logs & dumps
+/*.txt
+!/mtkloader/map.txt
+/devicetree/
+
 # Firmware fetch dirs
 fw-*/
 
@@ -21,3 +26,8 @@ out/
 *.o
 *.elf
 *.log
+
+# Logs: track the final verified run
+logs/*
+!logs/last_run_pmsg.txt
+!logs/last_run_console.txt
