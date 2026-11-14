@@ -80,6 +80,8 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #define XNU_BOOT_ARGS       "debug=0x8 serial=3 " XNU_ROOT_ARG " " XNU_EXTRA_ARGS
 #endif
 
+static char s_boot_args[256];
+
 #define CHAIN_OFFSET        0x40000u
 #define KERNEL_PA           0x40000000ULL
 #define CHAIN_STUB_PA       0x80001000ULL
@@ -620,7 +622,7 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_u64(&w, "unique-chip-id", 0x000052445730001ULL);
 	dt_prop_u32(&w, "chip-id", 0x8015);
 	dt_prop_u32(&w, "board-id", 0x06);
-	dt_prop_str(&w, "boot-args", XNU_BOOT_ARGS);
+	dt_prop_str(&w, "boot-args", s_boot_args[0] ? s_boot_args : XNU_BOOT_ARGS);
 	dt_prop(&w, "mac-address", wifi_address, sizeof(wifi_address));
 	dt_prop(&w, "mac-address-wifi0", wifi_address, sizeof(wifi_address));
 	dt_prop(&w, "bluetooth-address", bluetooth_address, sizeof(bluetooth_address));
@@ -2134,7 +2136,7 @@ static void hw_probes(void)
 
 /* ---- Start XNU ---- */
 
-static void __attribute__((noreturn)) run_xnu(void)
+static void __attribute__((noreturn)) run_xnu(int interactive)
 {
 	struct payload_info pi;
 	struct xnu_syms s;
@@ -2247,6 +2249,22 @@ static void __attribute__((noreturn)) run_xnu(void)
 		memcpy((void *)rd_pa, pi.ramdisk, pi.ramdisk_size);
 	}
 
+	if (interactive) {
+		/* Interactive session: no loader_return_after, Darwin stays on screen indefinitely */
+		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000";
+		size_t l = strlen(args);
+		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
+		memcpy(s_boot_args, args, l);
+		s_boot_args[l] = '\0';
+	} else {
+		/* Automated test: auto-returns after 6 seconds */
+		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 loader_return_after=6 ufs=2 ufs_shared_pa=0x60004000";
+		size_t l = strlen(args);
+		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
+		memcpy(s_boot_args, args, l);
+		s_boot_args[l] = '\0';
+	}
+
 	uint64_t dt_pa = rd_pa + rd_size;
 	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, 0, 0);
 	uint64_t ba_pa = (dt_pa + dt_len + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2269,11 +2287,13 @@ static void __attribute__((noreturn)) run_xnu(void)
 	ba->video.v_width = PANEL_W;
 	ba->video.v_height = PANEL_H;
 	ba->video.v_depth = 32;
-	memcpy(ba->commandLine, XNU_BOOT_ARGS, sizeof(XNU_BOOT_ARGS));
+	memcpy(ba->commandLine, s_boot_args, strlen(s_boot_args) + 1);
 
-	out("boot-args: " XNU_BOOT_ARGS "\n");
+	out("boot-args: ");
+	out(s_boot_args);
+	out("\n");
 
-	if (XNU_WDT_SECONDS) {
+	if (!interactive && XNU_WDT_SECONDS) {
 		uint32_t t = XNU_WDT_SECONDS > 31 ? 31 : XNU_WDT_SECONDS;
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
@@ -2286,12 +2306,19 @@ static void __attribute__((noreturn)) run_xnu(void)
 		out(" s (hardware warm reset)\n");
 	} else {
 		marker_set(0);
+		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
+		out("interactive session: watchdog disabled\n");
 	}
 
 	gic_fix_eoimode();
 
 	fbc.fg = 0xffffff00u; /* YELLOW */
-	out("\n[+] Jumping to XNU Darwin (5s test)...\n[!] Returning to Android automatically in ~8s...\n");
+	if (interactive) {
+		out("\n[+] Jumping to iOS / Darwin (Interactive Session)...\n");
+		out("[i] Screen will stay on. Hold Power for 8s to reboot to Android.\n");
+	} else {
+		out("\n[+] Jumping to XNU Darwin (5s test)...\n[!] Returning to Android automatically in ~8s...\n");
+	}
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
 
@@ -2366,29 +2393,34 @@ void mtkloader_main(uint64_t dtb)
 	hw_probes();
 
 	int pmsg_trig = xnu_requested();
-	int vol_down = !(rd32(0x1c00e000ULL + 0x04) & 1);
+	uint32_t kp_mem1 = rd32(0x1c00e000ULL + 0x04);
+	int vol_down = !(kp_mem1 & 1);
+	int vol_up = !(kp_mem1 & 2);
+	int key_pressed = ((kp_mem1 & 0x3ffff) != 0x3ffff);
 	int xnu = 0;
+	int interactive = 0;
 
 	if (s_usb_xnu_trigger) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / XNU directly...\n");
+		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / XNU (automated test)...\n");
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
+		interactive = 0;
 	} else if (pmsg_trig) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] PMSG TRIGGER FOUND! Booting Darwin / XNU directly...\n");
+		out("\n[+] PMSG TRIGGER FOUND! Booting Darwin / XNU (automated test)...\n");
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
-	} else if (vol_down) {
+		interactive = 0;
+	} else if (vol_down || vol_up || key_pressed) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] VOLUME DOWN PRESSED! Booting Darwin / XNU directly...\n");
+		out("\n[+] VOLUME BUTTON DETECTED! Booting iOS / Darwin (Interactive Dual-Boot)...\n");
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
+		interactive = 1;
 	} else {
-		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] Direct boot mode! Booting Darwin / XNU directly...\n");
-		fbc.fg = 0xffffffffu;
-		xnu = 1;
+		out("\n[+] No button held: booting Android directly (default)...\n");
+		xnu = 0;
 	}
 
 	if (!xnu) {
@@ -2396,5 +2428,5 @@ void mtkloader_main(uint64_t dtb)
 		chain_android();
 	}
 
-	run_xnu();
+	run_xnu(interactive);
 }
