@@ -227,7 +227,7 @@ struct xnu_syms {
 	    msgbufp, msgbuf, cpu_ttep, live, uart_tx_ready, uart_tx_data, uart_rx_ready, uart_putc, uart_putc_options, log_putc,
 	    nprocs, tasks_count, initproc, gic_cpu_init,
 	    gic_unhandled_count, gic_last_unhandled, gic_active_iar, host_keep, host_keep_len, host_keep_dropped,
-	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init;
+	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump;
 };
 
 static struct xnu_syms xsyms;
@@ -444,7 +444,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 		"_gic_unhandled_count", "_gic_last_unhandled", "_gic_active_iar",
 		"_redwood_host_keep", "_redwood_host_keep_len", "_redwood_host_keep_dropped",
 		"_hakios_host_keep", "_hakios_host_keep_len", "_hakios_host_keep_dropped",
-		"_cpu_init",
+		"_cpu_init", "_loader_jump",
 	};
 	uint64_t *slots = (uint64_t *)s;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
@@ -2066,10 +2066,17 @@ static void hw_probes(void)
 			lb->parts = vp;
 		}
 
-		/* 3. Check LBA 8 (misc partition) for USB trigger: "boot-xnu" */
+		/* 3. Check LBA 8 (misc partition) for USB trigger: "boot-xnu" or "boot-ios" */
 		static const uint8_t read_misc[10] = { 0x28, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
 		RUN_SCSI("READ(10)_MISC", 2, read_misc, 10, ufs_buf, 4096, 1);
-		if (memcmp(ufs_buf, "boot-xnu", 8) == 0) {
+		if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
+			out("UFS: >>> INTERACTIVE IOS TRIGGER FOUND IN MISC! <<<\n");
+			s_usb_xnu_trigger = 2;
+			memset(ufs_buf, 0, 4096);
+			static const uint8_t write_misc[10] = { 0x2A, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
+			RUN_SCSI("WRITE(10)_MISC", 2, write_misc, 10, ufs_buf, 4096, 0);
+			out("UFS: Trigger cleared in misc partition.\n");
+		} else if (memcmp(ufs_buf, "boot-xnu", 8) == 0) {
 			out("UFS: >>> USB TRIGGER FOUND IN MISC! <<<\n");
 			s_usb_xnu_trigger = 1;
 			memset(ufs_buf, 0, 4096);
@@ -2232,6 +2239,21 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		    "cpu_init: could not patch CPU subtype\n");
 	}
 
+	if (s.loader_jump) {
+		volatile uint32_t *at = (volatile uint32_t *)kva_to_pa(s.loader_jump);
+		int done = 0;
+		for (int i = 0; i < 32 && !done; i++) {
+			if (at[i] == 0xd538204au && at[i+1] == 0x9240154bu) {
+				at[i+1] = 0xd280032bu; /* mov x11, #0x19 (T0SZ=25) */
+				at[i+2] = 0xb340156au; /* bfxil x10, x11, #0, #6 */
+				at[i+3] = 0x14000008u; /* b +0x20 */
+				done = 1;
+			}
+		}
+		out(done ? "loader_jump: patched TTBR0 T0SZ=25 for clean return\n" :
+		    "loader_jump: could not patch\n");
+	}
+
 	if (s.stub_slot) {
 		volatile uint64_t *slot = (volatile uint64_t *)kva_to_pa(s.stub_slot);
 		if (slot[0] == 0x545352444c554e58ULL) { /* "XNULDRST" */
@@ -2257,8 +2279,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	} else {
-		/* Automated test: auto-returns after 6 seconds */
-		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 loader_return_after=6 ufs=2 ufs_shared_pa=0x60004000";
+		/* Automated test: auto-returns after 4 seconds on core 0 */
+		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=1 return_cpu=0 loader_return_after=4 ufs=2 ufs_shared_pa=0x60004000";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2293,7 +2315,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out(s_boot_args);
 	out("\n");
 
-	if (!interactive && XNU_WDT_SECONDS) {
+	if (!interactive && (XNU_WDT_SECONDS != 0)) {
 		uint32_t t = XNU_WDT_SECONDS > 31 ? 31 : XNU_WDT_SECONDS;
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
