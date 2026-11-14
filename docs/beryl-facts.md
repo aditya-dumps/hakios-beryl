@@ -58,6 +58,22 @@ All facts and numbers below are extracted directly from the live device (`ZHT4IB
 * **UFS Host Controller Node**: `ufshci@112b0000`
 * **UFS Controller Base**: `0x112b0000`, size `0x2300`
 * **UFS Compatible**: `"mediatek,mt8183-ufshci"`
+* **UFSHCI Version**: `0x200` (UFSHCI 2.0 / 2.1)
+* **Command Type (CT)**: Requires `1u << 28` (`UTP_CMD_TYPE_UFS_STORAGE`) for both Query and SCSI commands
+* **LUN Mapping**: LUN 2 (`sdc` user data unit, 256 GB)
+* **GPT Partition Geometry (Verified on Silicon - 74 Partitions)**:
+  * Block size: `4096` bytes
+  * `misc`: LBA `8`..`135` (holds USB `boot-xnu` trigger)
+  * `boot_a`: LBA `181504`..`214271` (128 MB)
+  * `vendor_boot_a`: LBA `214272`..`230655` (64 MB)
+  * `init_boot_a`: LBA `230656`..`232703` (8 MB)
+  * `super`: LBA `460800`..`2689023` (8704 MB / 8.5 GB)
+  * `userdata`: LBA `2689024`..`62476279` (233,543 MB / 228 GB)
+  * `flashinfo`: LBA `62476280`..`62480375` (16 MB)
+* **XNU Storage Integration (`ufs_shared_pa`)**:
+  * Published at physical address `0x60004000ULL` (`magic=0x4b434f4c42574452ULL`, `version=3`, `size=0x2b00`)
+  * Data transfer buffer at `0x60010000ULL` (64 KB)
+  * Exposed in XNU as `/dev/ufs_<name>` and `/dev/rufs_<name>` for all 74 partitions
 * **IRQ**: SPI 393 (`<0x0 0x189 0x4 0x0>`)
 * **Boot Partition**: `/dev/block/by-name/boot_a` -> `/dev/block/sdc31` (134,217,728 bytes = 128 MB)
 * **Source**: `fdt.dts` `/soc/ufshci@112b0000`, `/sys/block/sda/device/model`, `/dev/block/by-name/`
@@ -100,14 +116,16 @@ All facts and numbers below are extracted directly from the live device (`ZHT4IB
 * **Source**: `fdt.dts` `/soc/watchdog@1c007000`, Linux `drivers/watchdog/mtk_wdt.c`
 
 ## 10. Touchscreen Controller
-* **Chip**: FocalTech Touch IC (`focaltech@38`)
+* **Chip**: FocalTech `FT3519T` (`focaltech@38`, IC ID `0x5452`)
 * **Compatible**: `"focaltech,fts"`
-* **Bus**: I2C (`i2c@11ed0000`)
-* **Reset GPIO**: GPIO 3 (`<0xc 0x3 0x1>`)
-* **IRQ GPIO**: GPIO 22 (`<0xc 0x16 0x2>`)
+* **Firmware Version**: `31` (`0x1F`)
+* **Driver Version**: FocalTech V4.1
+* **Bus**: I2C-0 (`i2c@11ed0000`, 7-bit slave address `0x38`)
+* **Reset GPIO**: GPIO 3 (`<0xc 0x3 0x1>`, kernel gpio 515)
+* **IRQ GPIO**: GPIO 22 (`<0xc 0x16 0x2>`, kernel gpio 534)
 * **Max Touch Points**: 10
-* **Coordinates Range**: 0x0 - 0x437f x 0x0 - 0x95ff (scaled to 1080 x 2400)
-* **Source**: `fdt.dts` `/i2c@11ed0000/focaltech@38`
+* **Coordinates Range**: `(0, 0)` to `(17279, 38399)` (`0x437f` x `0x95ff`), mapped to 1080 x 2400 panel
+* **Source**: `fdt.dts` `/i2c@11ed0000/focaltech@38`, `/sys/devices/platform/11ed0000.i2c/i2c-0/0-0038/fts_driver_info`
 
 ## 11. Co-processors (SCP & CONNSYS)
 * **SCP (System Companion Processor)**: `0x1c700000` (`scp@1c700000`)
