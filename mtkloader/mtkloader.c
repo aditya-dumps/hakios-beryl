@@ -227,7 +227,7 @@ struct xnu_syms {
 	    msgbufp, msgbuf, cpu_ttep, live, uart_tx_ready, uart_tx_data, uart_rx_ready, uart_putc, uart_putc_options, log_putc,
 	    nprocs, tasks_count, initproc, gic_cpu_init,
 	    gic_unhandled_count, gic_last_unhandled, gic_active_iar, host_keep, host_keep_len, host_keep_dropped,
-	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump;
+	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump, cons_ops_index;
 };
 
 static struct xnu_syms xsyms;
@@ -444,7 +444,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 		"_gic_unhandled_count", "_gic_last_unhandled", "_gic_active_iar",
 		"_redwood_host_keep", "_redwood_host_keep_len", "_redwood_host_keep_dropped",
 		"_hakios_host_keep", "_hakios_host_keep_len", "_hakios_host_keep_dropped",
-		"_cpu_init", "_loader_jump",
+		"_cpu_init", "_loader_jump", "_cons_ops_index",
 	};
 	uint64_t *slots = (uint64_t *)s;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
@@ -2261,6 +2261,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 			slot[2] = XNU_CHECKPOINT;
 			slot[3] = XNU_SLIDE;
 		}
+	}
+
+	if (s.cons_ops_index) {
+		volatile uint32_t *idx = (volatile uint32_t *)kva_to_pa(s.cons_ops_index);
+		*idx = 1; /* Force XNU console to video console (on-screen framebuffer) */
+		out("cons_ops_index: video console enabled on screen\n");
 	}
 
 	uint64_t kern_hi = (kva_to_pa(vm_hi) + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
