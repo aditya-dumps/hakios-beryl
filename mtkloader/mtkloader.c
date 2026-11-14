@@ -2273,7 +2273,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 
 	if (interactive) {
 		/* Interactive session: no loader_return_after, Darwin stays on screen indefinitely */
-		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000";
+		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 interactive=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
