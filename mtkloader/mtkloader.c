@@ -2069,12 +2069,8 @@ static void hw_probes(void)
 		/* 3. Check LBA 8 (misc partition) for USB trigger: "boot-xnu" or "boot-ios" */
 		static const uint8_t read_misc[10] = { 0x28, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
 		RUN_SCSI("READ(10)_MISC", 2, read_misc, 10, ufs_buf, 4096, 1);
-		if (memcmp(ufs_buf, "boot-ios-always", 15) == 0) {
-			out("UFS: >>> PERSISTENT IOS TRIGGER FOUND IN MISC! <<<\n");
-			s_usb_xnu_trigger = 2;
-			out("UFS: Persistent trigger kept in misc (boots iOS every time).\n");
-		} else if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
-			out("UFS: >>> INTERACTIVE IOS TRIGGER FOUND IN MISC! <<<\n");
+		if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
+			out("UFS: >>> ONE-SHOT IOS TRIGGER FOUND IN MISC! <<<\n");
 			s_usb_xnu_trigger = 2;
 			memset(ufs_buf, 0, 4096);
 			static const uint8_t write_misc[10] = { 0x2A, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
@@ -2277,7 +2273,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 
 	if (interactive) {
 		/* Interactive session: no loader_return_after, Darwin stays on screen indefinitely */
-		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 interactive=1";
+		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 interactive=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2422,7 +2418,6 @@ void mtkloader_main(uint64_t dtb)
 	uint32_t kp_mem1 = rd32(0x1c00e000ULL + 0x04);
 	int vol_down = !(kp_mem1 & 1);
 	int vol_up = !(kp_mem1 & 2);
-	int key_pressed = ((kp_mem1 & 0x3ffff) != 0x3ffff);
 	int xnu = 0;
 	int interactive = 0;
 
@@ -2444,7 +2439,7 @@ void mtkloader_main(uint64_t dtb)
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
 		interactive = 0;
-	} else if (vol_down || vol_up || key_pressed) {
+	} else if (vol_down || vol_up) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
 		out("\n[+] VOLUME BUTTON DETECTED! Booting iOS / Darwin (Interactive Dual-Boot)...\n");
 		fbc.fg = 0xffffffffu;
