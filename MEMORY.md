@@ -167,3 +167,18 @@
   - **Factor 3: Console Decoding**: `read_screen()` uses MSB-first pixel order (`0x80u >> x`) with normal, inverted, and bit-reversed hashing against pristine Mach-O `_iso_font` (offset `0xae7e10`).
   - **Factor 4: DRAM Bit Preservation & Pointer Sanitization**: `sanitize_kva()` restores canonical 64-bit kernel prefix `0xfffffff0` if upper bits experience charge decay across reset.
   - **Factor 5: Cache Invalidation**: `dcache_inval_range` across `LK_FB_BASE` (10.44 MB), `s.log` (1.25 MB), `_msgbufp`, and message buffer before reading.
+  - **Factor 6: Direct Framebuffer Renderer (`direct_vcputc`)**: Apple VT100 console emulator in XNU discards all console characters if `_gc_enabled == 0`. Replaced `_vcputc_options` (`0xfffffff007428cac`) with a direct 48-word ARM64 framebuffer renderer calling `_vc_paint_char` (`0xfffffff00742b8e8`) with boundary checks, line wrapping, and mirroring to `_loader_log_putc` (`0xfffffff007475178`).
+  - **Factor 7: `_gc_enable` Ticket Lock Panic Fix**: Patched `_gc_enable` (`0xfffffff00742cd3c`) with `ret` (`0xd65f03c0`) and preserved `_gc_initialized = 0` to prevent uninitialized `gc_lock` ticket lock crashes (`@lock_ticket.c:134`).
+
+## 3. Strict Goal & Interactive iOS Boot Architecture
+* **PRIMARY OBJECTIVE**: Strictly boot and interactively run HakiOS (Darwin XNU-8796.121.2 kernel + iOS 16.5 userland) on Redmi Note 14 5G (`beryl`, MT6855) with persistent coexistence alongside Android.
+* **Dual-Boot Invariants**:
+  1. Default: Stock Android boots directly with zero interference or button presses.
+  2. Interactive iOS: Armed via `./tools/boot-ios.sh` (`boot-ios` flag in `misc` partition LBA 8):
+     - All 8 CPU cores active (`cpus=8 small_cores_after=0`).
+     - Hardware watchdog (TOPRGU/SPM) completely DISABLED.
+     - `loader_return_after` completely DISABLED (indefinite interactive execution).
+     - Live visual console output rendered directly to AMOLED screen (`0x60000000`).
+     - Root APFS ramdisk mounted (`rd=md0`).
+     - `/sbin/launchd` userland process executed.
+* **Safety Invariant**: Flash strictly to `boot_a` with `./tools/flash-boot-a.sh`. Never touch `boot_b` or any system/firmware partition.
