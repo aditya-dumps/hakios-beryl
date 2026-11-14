@@ -228,7 +228,8 @@ struct xnu_syms {
 	    nprocs, tasks_count, initproc, gic_cpu_init,
 	    gic_unhandled_count, gic_last_unhandled, gic_active_iar, host_keep, host_keep_len, host_keep_dropped,
 	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump, cons_ops_index,
-	    switch_to_serial_console, switch_to_video_console;
+	    switch_to_serial_console, switch_to_video_console,
+	    vcputc_options, gc_initialized, gc_enabled, gc_x, gc_y;
 };
 
 static struct xnu_syms xsyms;
@@ -447,6 +448,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 		"_hakios_host_keep", "_hakios_host_keep_len", "_hakios_host_keep_dropped",
 		"_cpu_init", "_loader_jump", "_cons_ops_index",
 		"_switch_to_serial_console", "_switch_to_video_console",
+		"_vcputc_options", "_gc_initialized", "_gc_enabled", "_gc_x", "_gc_y",
 	};
 	uint64_t *slots = (uint64_t *)s;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
@@ -466,7 +468,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 	const char *strs = (const char *)(kernel + st->stroff);
 	for (uint32_t i = 0; i < st->nsyms; i++) {
 		const char *n = strs + sym[i].n_strx;
-		if (n[0] != '_' || (n[1] != 'l' && n[1] != 'v' && n[1] != 'd' && n[1] != 'i' && n[1] != 'm' && n[1] != 'c' && n[1] != 'g' && n[1] != 'n' && n[1] != 't' && n[1] != 'r' && n[1] != 'h')) {
+		if (n[0] != '_' || (n[1] != 'l' && n[1] != 'v' && n[1] != 'd' && n[1] != 'i' && n[1] != 'm' && n[1] != 'c' && n[1] != 'g' && n[1] != 'n' && n[1] != 't' && n[1] != 'r' && n[1] != 'h' && n[1] != 's')) {
 			continue;
 		}
 		for (unsigned k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
@@ -2206,7 +2208,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		r[0] = 0x52800020u; /* mov w0, #1 */
 		r[1] = 0xd65f03c0u; /* ret */
 		d[0] = 0xd65f03c0u; /* ret */
-		if (s.log_putc) {
+		if (s.vcputc_options) {
+			int64_t rel = (int64_t)(s.vcputc_options - s.uart_tx_data) >> 2;
+			if (rel >= -(1 << 25) && rel < (1 << 25)) {
+				d[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
+			}
+		} else if (s.log_putc) {
 			int64_t rel = (int64_t)(s.log_putc - s.uart_tx_data) >> 2;
 			if (rel >= -(1 << 25) && rel < (1 << 25)) {
 				d[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
@@ -2217,6 +2224,41 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 			rx[0] = 0x52800000u; /* mov w0, #0 */
 			rx[1] = 0xd65f03c0u; /* ret */
 		}
+	}
+
+	if (s.vcputc_options) {
+		static const uint32_t direct_vcputc_code[48] = {
+			0x7100005fu, 0x1a801042u, 0x12001c42u, 0x34000582u,
+			0x7100345fu, 0x54000540u, 0xa9be7bfdu, 0xa90153f3u,
+			0x910003fdu, 0x2a0203f3u, 0x2a1303e0u, 0x94013128u,
+			0xd0003b28u, 0xf947fd08u, 0xb40003e8u, 0x71002a7fu,
+			0x540000a0u, 0x90004a68u, 0xb94c1900u, 0x7102081fu,
+			0x54000183u, 0x90004a68u, 0xb90c191fu, 0x90004a69u,
+			0xb94c1d21u, 0x11000421u, 0x7102443fu, 0x54000043u,
+			0x528001e1u, 0xb90c1d21u, 0x71002a7fu, 0x540001c0u,
+			0x90004a68u, 0xb94c1900u, 0x90004a69u, 0xb94c1d21u,
+			0x2a1303e2u, 0x52800003u, 0x52800004u, 0x52800005u,
+			0x94000ae7u, 0x90004a68u, 0xb94c1900u, 0x11000400u,
+			0xb90c1900u, 0xa94153f3u, 0xa8c27bfdu, 0xd65f03c0u
+		};
+		volatile uint32_t *vcp = (volatile uint32_t *)kva_to_pa(s.vcputc_options);
+		for (int i = 0; i < 48; i++) {
+			vcp[i] = direct_vcputc_code[i];
+		}
+		out("vcputc_options: direct framebuffer renderer installed\n");
+	}
+
+	if (s.gc_x) {
+		*(volatile uint32_t *)kva_to_pa(s.gc_x) = 0;
+	}
+	if (s.gc_y) {
+		*(volatile uint32_t *)kva_to_pa(s.gc_y) = 15;
+	}
+	if (s.gc_initialized) {
+		*(volatile uint32_t *)kva_to_pa(s.gc_initialized) = 1;
+	}
+	if (s.gc_enabled) {
+		*(volatile uint32_t *)kva_to_pa(s.gc_enabled) = 1;
 	}
 
 	if (s.gic_cpu_init) {
