@@ -227,7 +227,8 @@ struct xnu_syms {
 	    msgbufp, msgbuf, cpu_ttep, live, uart_tx_ready, uart_tx_data, uart_rx_ready, uart_putc, uart_putc_options, log_putc,
 	    nprocs, tasks_count, initproc, gic_cpu_init,
 	    gic_unhandled_count, gic_last_unhandled, gic_active_iar, host_keep, host_keep_len, host_keep_dropped,
-	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump, cons_ops_index;
+	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump, cons_ops_index,
+	    switch_to_serial_console, switch_to_video_console;
 };
 
 static struct xnu_syms xsyms;
@@ -445,6 +446,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 		"_redwood_host_keep", "_redwood_host_keep_len", "_redwood_host_keep_dropped",
 		"_hakios_host_keep", "_hakios_host_keep_len", "_hakios_host_keep_dropped",
 		"_cpu_init", "_loader_jump", "_cons_ops_index",
+		"_switch_to_serial_console", "_switch_to_video_console",
 	};
 	uint64_t *slots = (uint64_t *)s;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
@@ -1681,8 +1683,12 @@ static void hw_probes(void)
 	out_hex(kp_sta);
 	out(" MEM1 ");
 	out_hex(kp_mem1);
-	if (!(kp_mem1 & 1)) {
+	if (kp_mem1 != 0 && kp_mem1 != 0xffffffff && !(kp_mem1 & 1)) {
 		out(" (VOL_DOWN PRESSED)");
+	} else if (kp_mem1 != 0 && kp_mem1 != 0xffffffff && !(kp_mem1 & 2)) {
+		out(" (VOL_UP PRESSED)");
+	} else if (kp_mem1 == 0 || kp_mem1 == 0xffffffff) {
+		out(" (UNINITIALIZED / IDLE)");
 	} else {
 		out(" (VOL_DOWN IDLE)");
 	}
@@ -2263,6 +2269,17 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
+	if (s.switch_to_serial_console && s.switch_to_video_console) {
+		/*
+		 * In XNU, PE_initialize_console hardcodes a call to _switch_to_serial_console,
+		 * which clears _cons_ops_index to 0 and suppresses all on-screen video console output.
+		 * Patch _switch_to_serial_console to branch directly to _switch_to_video_console (0x17fffffa).
+		 */
+		volatile uint32_t *sw = (volatile uint32_t *)kva_to_pa(s.switch_to_serial_console);
+		*sw = 0x17fffffa; /* b _switch_to_video_console */
+		out("switch_to_serial_console: patched to branch to _switch_to_video_console\n");
+	}
+
 	if (s.cons_ops_index) {
 		volatile uint32_t *idx = (volatile uint32_t *)kva_to_pa(s.cons_ops_index);
 		*idx = 1; /* Force XNU console to video console (on-screen framebuffer) */
@@ -2422,8 +2439,17 @@ void mtkloader_main(uint64_t dtb)
 
 	int pmsg_trig = xnu_requested();
 	uint32_t kp_mem1 = rd32(0x1c00e000ULL + 0x04);
-	int vol_down = !(kp_mem1 & 1);
-	int vol_up = !(kp_mem1 & 2);
+	/*
+	 * MediaTek Keypad register KP_MEM1:
+	 * Idle: 0x0000ffff (active-low pull-up).
+	 * Vol-Down pressed: bit 0 pulled low (0x0000fffe).
+	 * Vol-Up pressed: bit 1 pulled low (0x0000fffd).
+	 * If register reads 0x00000000 (unclocked/uninitialized by LK) or 0xffffffff (bus fault),
+	 * do NOT treat it as a button press!
+	 */
+	int kp_valid = (kp_mem1 != 0 && kp_mem1 != 0xffffffff);
+	int vol_down = kp_valid && !(kp_mem1 & 1);
+	int vol_up = kp_valid && !(kp_mem1 & 2);
 	int xnu = 0;
 	int interactive = 0;
 
