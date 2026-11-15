@@ -2417,6 +2417,14 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 
 	uint64_t sys_size = interactive ? load_system_image() : 0;
+	if (interactive && sys_size == 0) {
+		fbc.fg = 0xffff0000u;
+		out("\n[-] FATAL: Failed to stream iOS system image! Halting.\n");
+		fbc.fg = 0xffffffffu;
+		for (;;) {
+			dbg_delay_ms(1000);
+		}
+	}
 	uint64_t sys_pa = sys_size ? SYSTEM_PA : 0;
 	uint64_t dt_pa = rd_pa + rd_size;
 	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, 0, 0);
