@@ -77,6 +77,10 @@ jump_to_kernel:
     mov     x2, #0x3c5          /* EL1h, DAIF masked */
     msr     spsr_el2, x2
     msr     elr_el2, x16
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    isb
     eret
 1:  mrs     x2, sctlr_el1
     bic     x2, x2, #0x1

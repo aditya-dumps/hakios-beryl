@@ -69,7 +69,7 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #endif
 
 #ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 loader_return_after=6 ufs=2 ufs_shared_pa=0x60004000"
+#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 loader_return_after=6 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0"
 #endif
 
 #define XNU_ROOT_ARG        "rd=md0"
@@ -132,6 +132,9 @@ _Static_assert(__builtin_offsetof(struct boot_args, video) == 40, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, deviceTreeP) == 96, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, commandLine) == 108, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, bootFlags) == 720, "boot_args");
+
+#define SYS_UFS_LBA_START   61689024ULL
+#define SYS_UFS_BLOCKS      604671ULL
 
 #define BLOCK_MAGIC        0x4b434f4c42574452ULL       /* "RDWBLOCK" */
 #define BLOCK_VERSION      3
@@ -591,6 +594,8 @@ static void build_nvram_image(uint8_t *image)
 static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_size,
     uint64_t sys_pa, uint64_t sys_size)
 {
+	(void)sys_pa;
+	(void)sys_size;
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
 	uint64_t cntfrq = 13000000ULL; /* 13 MHz MT6855 system timer */
 	uint8_t seed[64];
@@ -718,8 +723,13 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
+	dt_prop_u32(&w, "AAPL,phandle", 0x10);
 	uint64_t gic_reg[4] = { 0x0c000000 - 0x0c000000, 0x10000, 0x0c040000 - 0x0c000000, 0x200000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	dt_end(&w);
+
+	dt_begin(&w, "cpu-debug-interface");
+	dt_prop_str(&w, "compatible", "arm,coresight-cpu-debug");
 	dt_end(&w);
 
 	dt_begin(&w, "uart0");
@@ -2071,6 +2081,53 @@ static void hw_probes(void)
 				out_dec((uint32_t)((e_lba - s_lba + 1) * 4096 / (1024 * 1024)));
 				out(" MB)\n");
 			}
+			/* Register iOS APFS Container as "darwin" */
+			if (vp < BLOCK_MAX_PARTS) {
+				char darwin_name[] = "darwin";
+				int n = 0;
+				for (; darwin_name[n]; n++) lb->part[vp].name[n] = darwin_name[n];
+				lb->part[vp].name[n] = '\0';
+				lb->part[vp].block_size = 4096;
+				lb->part[vp].start_lba = SYS_UFS_LBA_START;
+				lb->part[vp].blocks = SYS_UFS_BLOCKS;
+				lb->part[vp].unit = 0;
+				lb->part[vp].lun = 2;
+				lb->part[vp].flags = 0;
+				vp++;
+				out("  [darwin] LBA ");
+				out_dec((uint32_t)SYS_UFS_LBA_START);
+				out("..");
+				out_dec((uint32_t)(SYS_UFS_LBA_START + SYS_UFS_BLOCKS - 1));
+				out(" (2477 MB, APFS Container)\n");
+			}
+			/* Register alias "xnusys" */
+			if (vp < BLOCK_MAX_PARTS) {
+				char xnusys_name[] = "xnusys";
+				int n = 0;
+				for (; xnusys_name[n]; n++) lb->part[vp].name[n] = xnusys_name[n];
+				lb->part[vp].name[n] = '\0';
+				lb->part[vp].block_size = 4096;
+				lb->part[vp].start_lba = SYS_UFS_LBA_START;
+				lb->part[vp].blocks = SYS_UFS_BLOCKS;
+				lb->part[vp].unit = 0;
+				lb->part[vp].lun = 2;
+				lb->part[vp].flags = 0;
+				vp++;
+			}
+			/* Register "unit0" (BLOCK_PART_UNIT = 1u) for native UFS driver */
+			if (vp < BLOCK_MAX_PARTS) {
+				char unit_name[] = "unit0";
+				int n = 0;
+				for (; unit_name[n]; n++) lb->part[vp].name[n] = unit_name[n];
+				lb->part[vp].name[n] = '\0';
+				lb->part[vp].block_size = 4096;
+				lb->part[vp].start_lba = 0;
+				lb->part[vp].blocks = 62480384ULL;
+				lb->part[vp].unit = 0;
+				lb->part[vp].lun = 2;
+				lb->part[vp].flags = 1u;
+				vp++;
+			}
 			lb->parts = vp;
 		}
 
@@ -2338,13 +2395,14 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Interactive session: no loader_return_after, Darwin stays on screen indefinitely */
 		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 interactive=1";
+		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=darwin interactive=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	} else {
 		/* Automated test: auto-returns after 4 seconds on core 0 */
-		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=1 return_cpu=0 loader_return_after=4 ufs=2 ufs_shared_pa=0x60004000";
+		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=1 return_cpu=0 loader_return_after=4 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);

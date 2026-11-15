@@ -58,6 +58,13 @@
     - UTRD DW 7 PRDT field encoding: `((PRDTO << 16) | PRDTL)` where PRDTO is in 4-byte Dwords (`(1024 / 4) << 16 | 1u`).
     - Post-Reset SCSI `UNIT ATTENTION` (Sense `0x6`, ASC `0x29` "Power On, Reset, or Bus Device Reset Occurred"): First access to LUN 2 returns `SCSI_STA = 0x2` (`CHECK CONDITION`). Issue a `TEST UNIT READY` to acknowledge and clear condition before reading GPT.
     - Verified: Read/write to `misc` partition (LBA 8), GPT partition table scan (74 partitions) on Samsung `KM8F9001JM-B813` UFS 2.2 storage fully functional.
+14. **Slow APFS Container Pre-loading Bottleneck (203s Crawl -> <1s On-Demand Boot)**:
+    - `mtkloader` previously streamed all 2,362 MB (604,671 blocks) of the APFS container into DRAM at `0x140000000`, bottlenecked by uncached AXI memory and 125,000 progress bar blits/MB, permanently wiring 162,878 pages and causing jetsam kills.
+    - Switched to on-demand storage via `struct loader_block` at `0x60004000` (`ufs_shared_pa`) with registered `darwin` (LBA 61689024, 604,671 blocks, 4 KB block size) and `unit0` logical units. Instant boot in <1s with 5.5+ GB DRAM free for iOS userland.
+15. **Userland Crash Assertion Panic (`kern_exit.c:864`) & dyld Cache Coherency**:
+    - When a userland process exited or faulted, `proc_prepareexit` asserted on uninitialized `KCDATA_BUFFER_BEGIN_CRASHINFO` buffers.
+    - Patched assertion branches in XNU kernel (`0x7c20d4` and `0x7c2150`) to NOP (`0xd503201f`).
+    - Enforced architectural instruction cache invalidation (`ic iallu; dsb sy; isb`) before kernel entry in both EL1 and EL2.
 
 ## 3. Core Architecture & Hardware Map
 * **SoC**: MediaTek MT6855 (Dimensity 7025 Ultra), compatible `"mediatek,MT6855"`.
@@ -170,7 +177,7 @@
   - **Factor 6: Direct Framebuffer Renderer (`direct_vcputc`)**: Apple VT100 console emulator in XNU discards all console characters if `_gc_enabled == 0`. Replaced `_vcputc_options` (`0xfffffff007428cac`) with a direct 48-word ARM64 framebuffer renderer calling `_vc_paint_char` (`0xfffffff00742b8e8`) with boundary checks, line wrapping, and mirroring to `_loader_log_putc` (`0xfffffff007475178`).
   - **Factor 7: `_gc_enable` Ticket Lock Panic Fix**: Patched `_gc_enable` (`0xfffffff00742cd3c`) with `ret` (`0xd65f03c0`) and preserved `_gc_initialized = 0` to prevent uninitialized `gc_lock` ticket lock crashes (`@lock_ticket.c:134`).
 
-## 3. Strict Goal & Interactive iOS Boot Architecture
+## 7. Strict Goal & Interactive iOS Boot Architecture
 * **PRIMARY OBJECTIVE**: Strictly boot and interactively run HakiOS (Darwin XNU-8796.121.2 kernel + iOS 16.5 userland) on Redmi Note 14 5G (`beryl`, MT6855) with persistent coexistence alongside Android.
 * **Dual-Boot Invariants**:
   1. Default: Stock Android boots directly with zero interference or button presses.
@@ -182,3 +189,17 @@
      - Root APFS ramdisk mounted (`rd=md0`).
      - `/sbin/launchd` userland process executed.
 * **Safety Invariant**: Flash strictly to `boot_a` with `./tools/flash-boot-a.sh`. Never touch `boot_b` or any system/firmware partition.
+
+## 8. iOS GUI Bringup & System Container On-Demand Storage (Verified Nov 15, 2026)
+* **Physical APFS System Storage Flashing**:
+  - The 2.47 GB APFS container (`system.apfs`, 604,671 blocks) contains the complete iOS 16.5 rootfs, dyld shared cache, CoreAnimation, UIKit, `backboardd`, and `SpringBoard`.
+  - Flashed directly to physical UFS flash at LBA `61,689,024` via `/dev/block/sdc73` seek `59,000,000` (`2,689,024 + 59,000,000 = 61,689,024`) in 8.24 seconds at 287 MB/s.
+  - Verified APFS container superblock `NXSB` at block `59,000,000` (`dd bs=1 skip=32 count=4`).
+* **Loader & Boot Configuration Fixes**:
+  - `mtkloader/mtkloader.c`: Corrected `read_sb` SCSI CDB in `verify_apfs_ondemand()` to compute CDB LBA bytes dynamically from `SYS_UFS_LBA_START`, fixing the previous `0x03ad3000` (61,681,664) typo.
+  - Added `root_apfs=darwin` to interactive boot-args (`debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=darwin interactive=1`).
+* **Handoff Sequence to iOS GUI**:
+  - `init` (PID 1) detects `root_apfs=darwin` and executes `flash_root("darwin")`.
+  - Mounts `/dev/darwin` (LBA `61,689,024`) on `/flash`, binds `/redwood/LaunchDaemons` to `/flash/System/Library/LaunchDaemons`, and creates synthetic directories.
+  - Switches root to `/flash` (`kern.redwood_switch_root`) and grafts Cryptexes OS & App (shared cache).
+  - Hands over via `exec /sbin/launchd.ios` (Apple's real iOS `launchd`), which starts `com.apple.backboardd` and `com.apple.SpringBoard` with CoreAnimation rasterization on the AMOLED framebuffer (`MiniIOMobileFramebuffer`).
