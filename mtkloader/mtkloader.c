@@ -22,7 +22,7 @@
 #define XNU_PHYS_BASE       0x80000000ULL
 #define XNU_MEM_SIZE        (LK_FB_BASE - XNU_PHYS_BASE) /* ~2016 MB */
 
-#define SYSTEM_PA           (XNU_PHYS_BASE + 0x08000000ULL)
+#define SYSTEM_PA           0x140000000ULL
 #define SYSTEM_PART         "xnusys"
 
 #define KERNEL_VIRT_BASE    0xfffffff004000000ULL
@@ -658,7 +658,14 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop(&w, "nvram-proxy-data", nvram_image, sizeof(nvram_image));
 
 	dt_begin(&w, "memory-map");
-	if (rd_size != 0) {
+	if (sys_size != 0) {
+		uint64_t sys_reg[2] = { sys_pa, sys_size };
+		dt_prop(&w, "RAMDisk", sys_reg, sizeof(sys_reg));
+		if (rd_size != 0) {
+			uint64_t rd_reg[2] = { rd_pa, rd_size };
+			dt_prop(&w, "RAMDisk1", rd_reg, sizeof(rd_reg));
+		}
+	} else if (rd_size != 0) {
 		uint64_t rd_reg[2] = { rd_pa, rd_size };
 		dt_prop(&w, "RAMDisk", rd_reg, sizeof(rd_reg));
 	}
@@ -2393,9 +2400,9 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 
 	if (interactive) {
-		/* Interactive session: no loader_return_after, Darwin stays on screen indefinitely */
 		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 interactive=1";
-		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=darwin interactive=1";
+		/* Interactive iOS 16.5 GUI session: system.apfs is md0, root.apfs is md1 */
+		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 slide=0 vm_swapfile_create=0 interactive=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2409,6 +2416,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		s_boot_args[l] = '\0';
 	}
 
+	uint64_t sys_size = interactive ? load_system_image() : 0;
+	uint64_t sys_pa = sys_size ? SYSTEM_PA : 0;
 	uint64_t dt_pa = rd_pa + rd_size;
 	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, 0, 0);
 	uint64_t ba_pa = (dt_pa + dt_len + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2422,6 +2431,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->virtBase = KERNEL_VIRT_BASE;
 	ba->memSize = XNU_MEM_SIZE;
 	ba->memSizeActual = XNU_MEM_SIZE;
+	ba->memSize = 0x1c0000000ULL;
 	ba->topOfKernelData = top;
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
@@ -2467,10 +2477,10 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	__asm__ volatile("dsb sy");
 
 	/* Clear framebuffer so Darwin XNU starts on a fresh, clean AMOLED canvas */
-	if (interactive) {
 		memset((void *)LK_FB_BASE, 0, FB_SCREEN_SIZE);
 		dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
-	}
+	/* Keep framebuffer console visible so boot progress is displayed on screen */
+	(void)draw_apple_logo;
 
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
 	__builtin_unreachable();
