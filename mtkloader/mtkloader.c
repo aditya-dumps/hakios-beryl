@@ -29,8 +29,16 @@
 #define XNU_SLIDE           (XNU_PHYS_BASE - KERNEL_VIRT_BASE)
 #define PAGE_SIZE_MAX       0x4000ULL
 
+/* UFS hardware and shared DMA layout */
+#define UFS_UTRD_PA         0x60000000ULL /* 1024 bytes: 32 slots x 32 bytes */
+#define UFS_UCD_PA          0x60000800ULL /* 2048 bytes: command descriptor within first 4KB page */
+#define UFS_SHARED_LB_PA    0x60004000ULL /* struct loader_block */
+#define UFS_BUF_PA          0x60010000ULL /* 64 KB buffer */
+#define UFS_NATIVE_AREA_PA  0x60020000ULL /* 68 KB: native XNU UFSHC area (0x1000 + 32 * 0x800) */
+#define UFS_NATIVE_AREA_SZ  0x11000ULL
+
 #ifndef XNU_WDT_SECONDS
-#define XNU_WDT_SECONDS     20
+#define XNU_WDT_SECONDS     300
 #endif
 
 #ifndef XNU_CORES
@@ -69,7 +77,7 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #endif
 
 #ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 loader_return_after=6 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0"
+#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0"
 #endif
 
 #define XNU_ROOT_ARG        "rd=md0"
@@ -80,7 +88,7 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #define XNU_BOOT_ARGS       "debug=0x8 serial=3 " XNU_ROOT_ARG " " XNU_EXTRA_ARGS
 #endif
 
-static char s_boot_args[256];
+static char s_boot_args[512];
 
 #define CHAIN_OFFSET        0x40000u
 #define KERNEL_PA           0x40000000ULL
@@ -173,7 +181,20 @@ struct loader_block {
 		uint64_t served, failed, bytes, ticks;
 	} answer __attribute__((aligned(128)));
 	struct loader_block_part part[BLOCK_MAX_PARTS] __attribute__((aligned(128)));
-	uint8_t native_pad[384];
+	struct {
+		uint64_t hc_pa;
+		uint64_t area_pa;
+		uint32_t area_size, ucd_offset, ucd_size, slots;
+		uint32_t uefi_utrlba, uefi_utrlbau;
+	} native __attribute__((aligned(128)));
+	struct {
+		volatile uint32_t take_back;
+	} loader_native __attribute__((aligned(128)));
+	struct {
+		volatile uint32_t list_in;
+		uint32_t switched_in, switched_out;
+		volatile uint32_t cnr_at_switch;
+	} kernel_native __attribute__((aligned(128)));
 };
 
 _Static_assert(__builtin_offsetof(struct loader_block, ask) == 128, "loader_block ask offset");
@@ -619,9 +640,10 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_str(&w, "darwin-board", "beryl");
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", XNU_PHYS_BASE);
-	dt_prop_u64(&w, "dram-size", 0x1c0000000ULL);
+	dt_prop_u64(&w, "dram-size", XNU_MEM_SIZE);
 	dt_prop_u64(&w, "time-base", 1794707662ULL);
 	dt_prop_u32(&w, "interrupt-controller", 0x10);
+	dt_prop_u32(&w, "interrupt-parent", 0x10);
 	dt_prop_u32(&w, "debug-enabled", 1);
 	dt_prop_u32(&w, "display-scale", 2);
 	dt_prop_u32(&w, "display-rotation", 0);
@@ -729,12 +751,20 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
 	dt_prop_u32(&w, "AAPL,phandle", 0x10);
+	dt_prop(&w, "interrupt-controller", NULL, 0);
 	uint64_t gic_reg[4] = { 0x0c000000 - 0x0c000000, 0x10000, 0x0c040000 - 0x0c000000, 0x200000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
 	dt_end(&w);
 
 	dt_begin(&w, "cpu-debug-interface");
+	dt_prop_str(&w, "device_type", "cpu-debug-interface");
 	dt_prop_str(&w, "compatible", "arm,coresight-cpu-debug");
+	dt_end(&w);
+
+	dt_begin(&w, "rtc");
+	dt_prop_str(&w, "device_type", "rtc");
+	dt_prop_str(&w, "compatible", "rtc");
+	dt_prop_u64(&w, "time-base", 1794707662ULL);
 	dt_end(&w);
 
 	dt_begin(&w, "uart0");
@@ -826,7 +856,7 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 	if (g && t1sz >= 16 && ttbr1) {
 		uint32_t vabits = 64 - t1sz, per = g - 3;
 		uint32_t levels = (vabits - g + per - 1) / per;
-		uint64_t table = ttbr1 & 0x0000fffffffffffeULL & ~((1ULL << g) - 1);
+		uint64_t table = (ttbr1 & 0x1ffffffffULL) & ~((1ULL << g) - 1);
 		for (uint32_t l = 0; l < levels; l++) {
 			if (table < 0x40000000ULL || table >= 0x240000000ULL) {
 				break;
@@ -840,11 +870,12 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 			if (pte_addr < 0x40000000ULL || pte_addr >= 0x240000000ULL) {
 				break;
 			}
+			dcache_inval_range(pte_addr, 64);
 			uint64_t d = *(volatile uint64_t *)pte_addr;
 			if (!(d & 1)) {
 				break;
 			}
-			uint64_t oa = d & 0x0000ffffffffffffULL & ~((1ULL << g) - 1);
+			uint64_t oa = (d & 0x1ffffffffULL) & ~((1ULL << g) - 1);
 			if (l == levels - 1 || !(d & 2)) { /* page, or block */
 				uint64_t span = 1ULL << shift;
 				return (oa & ~(span - 1)) | (va & (span - 1));
@@ -1039,28 +1070,16 @@ struct span {
 
 static void save_log(const struct span *sp, int nsp)
 {
-	uint64_t total = 0, room, head, tail, skip_to, at = 0;
-
-	for (int i = 0; i < nsp; i++) {
-		total += sp[i].n;
-	}
-	room = PLOG_CAP - PLOG_HDR->size;
-	room = room > 1024 ? room - 1024 : 0;
-	head = total <= room ? total : room / 4;
-	tail = total <= room ? 0 : room - head;
-	skip_to = total - tail;
-
 	uint64_t fb = fbc.base;
 	fbc.base = 0;
 	for (int i = 0; i < nsp; i++) {
-		for (uint64_t k = 0; k < sp[i].n; k++, at++) {
-			if (at < head || at >= skip_to) {
-				char c = sp[i].p[k];
-				plog_putc(c ? c : ' ');
-			} else if (at == head) {
-				dbg_puts("\n\n[... ");
-				dbg_dec(skip_to - head);
-				dbg_puts(" bytes of the XNU log left out here ...]\n\n");
+		for (uint64_t k = 0; k < sp[i].n; k++) {
+			char c = sp[i].p[k];
+			if (c == '\0') {
+				continue;
+			}
+			if ((c >= 32 && c <= 126) || c == '\n' || c == '\t' || c == '\r') {
+				plog_putc(c);
 			}
 		}
 	}
@@ -1249,7 +1268,7 @@ static void read_screen(void)
 	dbg_dec(last_row);
 	dbg_puts("]\n");
 
-	if (known == 0 && lit_cells > 50) {
+	if (lit_cells > 50) {
 		dbg_puts("[attempting 2x scaled font decode...]\n");
 		const uint32_t cols2 = PANEL_W / 16, rows2 = PANEL_H / 32;
 		static char line2[PANEL_W / 16 + 1];
@@ -1348,23 +1367,43 @@ static void rescue_state(void)
 	out(" bufc="); out_hex(bufc);
 	out("\n");
 
-	uint64_t bufc_pa = bufc ? kva_to_pa(bufc) : 0;
-	if (bufc_pa < 0x80000000ULL || bufc_pa >= 0x90000000ULL) {
-		bufc_pa = 0x83d2b77cULL;
+	uint64_t bufc_pa = xnu_va_to_pa(bufc);
+	if (!bufc_pa || bufc_pa < 0x40000000ULL || bufc_pa >= 0x240000000ULL) {
+		dcache_inval_range(mb_pa + 32, 64);
+		char test_c = *(volatile char *)(mb_pa + 32);
+		if ((test_c >= 32 && test_c <= 126) || test_c == '\n') {
+			bufc_pa = mb_pa + 32;
+		} else {
+			bufc_pa = kva_to_pa(bufc);
+		}
+	}
+	if (!bufc_pa || bufc_pa < 0x40000000ULL || bufc_pa >= 0x240000000ULL) {
+		bufc_pa = kva_to_pa(0xfffffff007d2b77cULL);
 	}
 	if (size == 0 || size > 256 * 1024) {
 		size = 131072;
 	}
-	out("bufc PA="); out_hex(bufc_pa); out("\n");
 	dcache_inval_range(bufc_pa, size);
+	out("bufc PA="); out_hex(bufc_pa); out("\n");
 	out("--- kernel message buffer (from DRAM) ---\n");
 	uint64_t fbsave = fbc.base;
 	fbc.base = 0;
-	uint32_t start_pos = (bufx < size) ? bufx : 0;
-	for (int pass = 0; pass < 2; pass++) {
-		uint32_t from = (pass == 0) ? start_pos : 0;
-		uint32_t to = (pass == 0) ? size : start_pos;
-		for (uint32_t i = from; i < to; i++) {
+
+	/* Circular buffer dump: if bufx < size, valid log is 0..bufx only */
+	if (bufx <= size) {
+		for (uint32_t i = 0; i < bufx; i++) {
+			char c = *(volatile char *)(bufc_pa + i);
+			if (c >= 32 && c <= 126) dbg_putc(c);
+			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
+		}
+	} else {
+		uint32_t pos = bufx % size;
+		for (uint32_t i = pos; i < size; i++) {
+			char c = *(volatile char *)(bufc_pa + i);
+			if (c >= 32 && c <= 126) dbg_putc(c);
+			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
+		}
+		for (uint32_t i = 0; i < pos; i++) {
 			char c = *(volatile char *)(bufc_pa + i);
 			if (c >= 32 && c <= 126) dbg_putc(c);
 			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
@@ -1388,11 +1427,9 @@ static void rescue_log(void)
 	xsyms = s;
 	xkernel = pi.kernel;
 
-	/* 1. Capture pristine Darwin framebuffer before anything overwrites or draws to it */
-	dcache_inval_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	/* 1. Keep fbc disabled during log rescue so output goes directly to ramoops */
 	uint64_t fb_save = fbc.base;
-	fbc.base = 0; /* Keep fbc disabled so logs go exclusively to plog/ramoops */
-	read_screen();
+	fbc.base = 0;
 
 	if (s.log && s.log_len && s.log_ring_at && s.log_wrapped) {
 		const uint64_t head_sz = 256 * 1024, ring_sz = 1024 * 1024;
@@ -1501,6 +1538,8 @@ void xnu_returned(uint64_t log_pa, uint64_t log_len, uint64_t reason,
 	}
 	save_host_keep(&xsyms);
 	rescue_state();
+	dcache_inval_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	read_screen();
 	show_log_tail(40);
 
 	out("\nHolding screen for 3s, then warm resetting to boot Android and read pstore...\n");
@@ -1837,9 +1876,9 @@ static void hw_probes(void)
 	if (ufs_hcs & 1) {
 		out("UFS: Device Present! Initializing SCSI subsystem...\n");
 		/* DMA buffers in general DRAM (0x60000000ULL) */
-		uint32_t *ufs_utrd = (uint32_t *)0x60000000ULL;
-		uint8_t *ufs_ucd   = (uint8_t *)0x60001000ULL;
-		uint8_t *ufs_buf   = (uint8_t *)0x60010000ULL;
+		uint32_t *ufs_utrd = (uint32_t *)UFS_UTRD_PA;
+		uint8_t *ufs_ucd   = (uint8_t *)UFS_UCD_PA;
+		uint8_t *ufs_buf   = (uint8_t *)UFS_BUF_PA;
 
 		/* Stop UTRL */
 		wr32(0x112b0000ULL + 0x60, 0);
@@ -2069,7 +2108,7 @@ static void hw_probes(void)
 				lb->part[vp].block_size = 4096;
 				lb->part[vp].start_lba = s_lba;
 				lb->part[vp].blocks = e_lba - s_lba + 1;
-				lb->part[vp].unit = 0;
+				lb->part[vp].unit = 2;
 				lb->part[vp].lun = 2;
 				vp++;
 				out("  [");
@@ -2095,7 +2134,7 @@ static void hw_probes(void)
 				lb->part[vp].block_size = 4096;
 				lb->part[vp].start_lba = SYS_UFS_LBA_START;
 				lb->part[vp].blocks = SYS_UFS_BLOCKS;
-				lb->part[vp].unit = 0;
+				lb->part[vp].unit = 2;
 				lb->part[vp].lun = 2;
 				lb->part[vp].flags = 0;
 				vp++;
@@ -2114,7 +2153,7 @@ static void hw_probes(void)
 				lb->part[vp].block_size = 4096;
 				lb->part[vp].start_lba = SYS_UFS_LBA_START;
 				lb->part[vp].blocks = SYS_UFS_BLOCKS;
-				lb->part[vp].unit = 0;
+				lb->part[vp].unit = 2;
 				lb->part[vp].lun = 2;
 				lb->part[vp].flags = 0;
 				vp++;
@@ -2128,12 +2167,27 @@ static void hw_probes(void)
 				lb->part[vp].block_size = 4096;
 				lb->part[vp].start_lba = 0;
 				lb->part[vp].blocks = 62480384ULL;
-				lb->part[vp].unit = 0;
+				lb->part[vp].unit = 2;
 				lb->part[vp].lun = 2;
 				lb->part[vp].flags = 1u;
 				vp++;
 			}
 			lb->parts = vp;
+
+			/* Populate native UFSHC configuration for XNU redwood_ufshc driver */
+			memset((void *)UFS_NATIVE_AREA_PA, 0, UFS_NATIVE_AREA_SZ);
+			dcache_clean_range(UFS_NATIVE_AREA_PA, UFS_NATIVE_AREA_SZ);
+
+			lb->native.hc_pa = 0x112b0000ULL;
+			lb->native.area_pa = UFS_NATIVE_AREA_PA;
+			lb->native.area_size = (uint32_t)UFS_NATIVE_AREA_SZ;
+			lb->native.ucd_offset = 0x1000;
+			lb->native.ucd_size = 0x800;
+			lb->native.slots = 32;
+			lb->native.uefi_utrlba = (uint32_t)UFS_UTRD_PA;
+			lb->native.uefi_utrlbau = 0;
+			dcache_clean_range(UFS_SHARED_LB_PA, sizeof(*lb));
+			out("UFS: Native controller area configured at 0x60020000 (68 KB)\n");
 		}
 
 		/* 3. Check LBA 8 (misc partition) for USB trigger: "boot-xnu" or "boot-ios" */
@@ -2215,44 +2269,52 @@ static void hw_probes(void)
 #include "apple_logo.h"
 
 
-static void draw_apple_logo(void)
+static void draw_apple_progress(uint32_t percent)
 {
 	if (!fbc.base) return;
-	memset((void *)LK_FB_BASE, 0, FB_SCREEN_SIZE);
 
 	uint32_t x_off = (PANEL_W - APPLE_LOGO_W) / 2;
-	uint32_t y_off = (PANEL_H - APPLE_LOGO_H) / 2;
+	uint32_t y_off = (PANEL_H - APPLE_LOGO_H) / 2 - 60;
+	uint32_t bar_w = 420;
+	uint32_t bar_h = 6;
+	uint32_t bar_x = (PANEL_W - bar_w) / 2;
+	uint32_t bar_y = y_off + APPLE_LOGO_H + 60;
 
-	for (uint32_t y = 0; y < APPLE_LOGO_H; y++) {
-		for (uint32_t x = 0; x < APPLE_LOGO_W; x++) {
-			uint32_t idx = y * APPLE_LOGO_W + x;
-			if ((apple_logo_bitmap[idx >> 3] >> (7 - (idx & 7))) & 1) {
-				fb_px(x_off + x, y_off + y, 0xffffffffu);
+	if (percent == 0) {
+		memset((void *)LK_FB_BASE, 0, FB_SCREEN_SIZE);
+
+		for (uint32_t y = 0; y < APPLE_LOGO_H; y++) {
+			for (uint32_t x = 0; x < APPLE_LOGO_W; x++) {
+				uint32_t idx = y * APPLE_LOGO_W + x;
+				if ((apple_logo_bitmap[idx >> 3] >> (7 - (idx & 7))) & 1) {
+					fb_px(x_off + x, y_off + y, 0xffffffffu);
+				}
 			}
 		}
 	}
+
+	if (percent > 100) percent = 100;
+	uint32_t fill_w = (bar_w * percent) / 100;
+
+	for (uint32_t by = 0; by < bar_h; by++) {
+		for (uint32_t bx = 0; bx < bar_w; bx++) {
+			uint32_t col = (bx <= fill_w) ? 0xffffffffu : 0xff3a3a3cu;
+			fb_px(bar_x + bx, bar_y + by, col);
+		}
+	}
+
 	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
 	__asm__ volatile("dsb sy");
 }
 
-static uint64_t load_system_image(void)
+static uint64_t verify_apfs_container(void)
 {
-	uint32_t *ufs_utrd = (uint32_t *)0x60000000ULL;
-	uint8_t *ufs_ucd = (uint8_t *)0x60001000ULL;
-	uint8_t *ufs_buf = (uint8_t *)0x60010000ULL;
-	uint64_t total_blocks = SYS_UFS_BLOCKS;
-	uint64_t lba = SYS_UFS_LBA_START;
-	uint64_t dst = SYSTEM_PA;
-	uint64_t total_bytes = total_blocks * 4096ULL;
+	uint32_t *ufs_utrd = (uint32_t *)UFS_UTRD_PA;
+	uint8_t *ufs_ucd = (uint8_t *)UFS_UCD_PA;
+	uint8_t *ufs_buf = (uint8_t *)UFS_BUF_PA;
+	out("\n[HakiOS] Verifying iOS 16.5 APFS Container on UFS (Instant Boot mode)...\n");
 
-	wdt_disable();
-	out("\n=======================================================\n");
-	out(" [HakiOS] Streaming iOS 16.5 System Container to DRAM\n");
-	out(" Source:   UFS LBA 61689024 (2.47 GB, 604671 blocks)\n");
-	out(" Target:   DRAM 0x140000000 (RAMDisk /dev/md0)\n");
-	out("=======================================================\n");
-
-	/* Verify superblock first */
+	/* Verify superblock at SYS_UFS_LBA_START */
 	uint8_t read_sb[10] = {
 		0x28, 0,
 		(uint8_t)(SYS_UFS_LBA_START >> 24),
@@ -2262,120 +2324,20 @@ static uint64_t load_system_image(void)
 		0, 0, 1, 0
 	};
 	RUN_SCSI("READ(10)_NXSB", 2, read_sb, 10, ufs_buf, 4096, 1);
-	if (ufs_buf[32] != 'N' || ufs_buf[33] != 'X' || ufs_buf[34] != 'S' || ufs_buf[35] != 'B') {
-		fbc.fg = 0xffff0000u; /* RED */
-		out("[-] ERROR: APFS Container Superblock (NXSB) not found at LBA 61689024!\n");
+	if (ufs_buf[32] == 'N' && ufs_buf[33] == 'X' && ufs_buf[34] == 'S' && ufs_buf[35] == 'B') {
+		fbc.fg = 0xff00ff00u; /* GREEN */
+		out("[+] APFS Container Superblock verified (NXSB) at LBA ");
+		out_dec((uint32_t)SYS_UFS_LBA_START);
+		out("! On-demand storage active.\n");
 		fbc.fg = 0xffffffffu;
-		return 0;
+		return (SYS_UFS_BLOCKS * 4096ULL);
 	}
-	fbc.fg = 0xff00ff00u; /* GREEN */
-	out("[+] APFS Superblock verified (NXSB). Starting high-speed streaming...\n");
+	fbc.fg = 0xffff0000u; /* RED */
+	out("[-] Warning: APFS Superblock check failed at LBA ");
+	out_dec((uint32_t)SYS_UFS_LBA_START);
+	out(" (ignoring, relying on ufs_shared_pa)\n");
 	fbc.fg = 0xffffffffu;
-
-	uint64_t blocks_left = total_blocks;
-	uint64_t cur_lba = lba;
-	uint64_t cur_dst = dst;
-	int last_pct = -1;
-
-	while (blocks_left > 0) {
-		uint32_t chunk_blocks = blocks_left > 16 ? 16 : (uint32_t)blocks_left;
-		uint32_t chunk_bytes = chunk_blocks * 4096;
-
-		memset(ufs_utrd, 0, 1024);
-		memset(ufs_ucd, 0, 2048);
-
-		ufs_ucd[0] = 0x01; /* UPIU_COMMAND */
-		ufs_ucd[1] = 0x40; /* Data In (read) */
-		ufs_ucd[2] = 2;    /* LUN 2 */
-		ufs_ucd[3] = 0;
-		ufs_ucd[12] = (uint8_t)(chunk_bytes >> 24);
-		ufs_ucd[13] = (uint8_t)(chunk_bytes >> 16);
-		ufs_ucd[14] = (uint8_t)(chunk_bytes >> 8);
-		ufs_ucd[15] = (uint8_t)chunk_bytes;
-
-		ufs_ucd[16] = 0x28; /* READ(10) */
-		ufs_ucd[17] = 0;
-		ufs_ucd[18] = (uint8_t)(cur_lba >> 24);
-		ufs_ucd[19] = (uint8_t)(cur_lba >> 16);
-		ufs_ucd[20] = (uint8_t)(cur_lba >> 8);
-		ufs_ucd[21] = (uint8_t)cur_lba;
-		ufs_ucd[22] = 0;
-		ufs_ucd[23] = (uint8_t)(chunk_blocks >> 8);
-		ufs_ucd[24] = (uint8_t)chunk_blocks;
-		ufs_ucd[25] = 0;
-
-		uint32_t *p = (uint32_t *)(ufs_ucd + 1024);
-		p[0] = (uint32_t)(uintptr_t)ufs_buf;
-		p[1] = (uint32_t)((uint64_t)(uintptr_t)ufs_buf >> 32);
-		p[2] = 0;
-		p[3] = chunk_bytes - 1;
-
-		ufs_utrd[0] = (1u << 28) | (1u << 24) | (2u << 25);
-		ufs_utrd[1] = 0;
-		ufs_utrd[2] = 0x0f;
-		ufs_utrd[3] = 0;
-		ufs_utrd[4] = (uint32_t)(uintptr_t)ufs_ucd;
-		ufs_utrd[5] = (uint32_t)((uint64_t)(uintptr_t)ufs_ucd >> 32);
-		ufs_utrd[6] = ((512 / 4) << 16) | (512 / 4);
-		ufs_utrd[7] = ((1024 / 4) << 16) | 1u;
-
-		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-		dcache_clean_range((uint64_t)(uintptr_t)ufs_utrd, 1024);
-		dcache_clean_range((uint64_t)(uintptr_t)ufs_ucd, 2048);
-		__asm__ volatile ("dsb sy" ::: "memory");
-
-		rd32(0x112b0000ULL + 0x38);
-		wr32(0x112b0000ULL + 0x20, rd32(0x112b0000ULL + 0x20));
-		wr32(0x112b0000ULL + 0x58, 1);
-
-		for (int t = 0; t < 5000000; t++) {
-			if ((rd32(0x112b0000ULL + 0x58) & 1) == 0) break;
-		}
-
-		__asm__ volatile ("dsb sy" ::: "memory");
-		dcache_inval_range((uint64_t)(uintptr_t)ufs_utrd, 1024);
-		dcache_inval_range((uint64_t)(uintptr_t)ufs_ucd, 2048);
-		dcache_inval_range((uint64_t)(uintptr_t)ufs_buf, chunk_bytes);
-		__asm__ volatile ("dsb sy" ::: "memory");
-
-		uint32_t ocs = ufs_utrd[2] & 0xff;
-		if (ocs != 0) {
-			fbc.fg = 0xffff0000u;
-			out("[-] UFS Read Error at LBA ");
-			out_dec((uint32_t)cur_lba);
-			out(": OCS=");
-			out_hex(ocs);
-			out("\n");
-			fbc.fg = 0xffffffffu;
-			return 0;
-		}
-
-		memcpy((void *)cur_dst, ufs_buf, chunk_bytes);
-
-		cur_lba += chunk_blocks;
-		cur_dst += chunk_bytes;
-		blocks_left -= chunk_blocks;
-
-		int pct = (int)(((total_blocks - blocks_left) * 100) / total_blocks);
-		if (pct != last_pct && (pct % 10 == 0 || pct == 100)) {
-			last_pct = pct;
-			fbc.fg = 0xff00ffffu; /* CYAN */
-			out("[+] Streaming system.apfs: ");
-			out_dec((uint32_t)pct);
-			out("% (");
-			out_dec((uint32_t)((total_blocks - blocks_left) * 4096 / (1024 * 1024)));
-			out(" MB / 2477 MB)\n");
-			fbc.fg = 0xffffffffu;
-		}
-	}
-
-	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-	__asm__ volatile ("dsb sy" ::: "memory");
-
-	fbc.fg = 0xff00ff00u; /* GREEN */
-	out("[+] iOS 16.5 System Image streaming COMPLETE! (2477 MB in DRAM)\n");
-	fbc.fg = 0xffffffffu;
-	return total_bytes;
+	return 0;
 }
 
 /* ---- Start XNU ---- */
@@ -2438,12 +2400,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		r[0] = 0x52800020u; /* mov w0, #1 */
 		r[1] = 0xd65f03c0u; /* ret */
 		d[0] = 0xd65f03c0u; /* ret */
-		if (s.vcputc_options) {
-			int64_t rel = (int64_t)(s.vcputc_options - s.uart_tx_data) >> 2;
-			if (rel >= -(1 << 25) && rel < (1 << 25)) {
-				d[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
-			}
-		} else if (s.log_putc) {
+		if (s.log_putc) {
 			int64_t rel = (int64_t)(s.log_putc - s.uart_tx_data) >> 2;
 			if (rel >= -(1 << 25) && rel < (1 << 25)) {
 				d[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
@@ -2456,26 +2413,17 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
-	if (s.vcputc_options) {
-		static const uint32_t direct_vcputc_code[46] = {
-			0x12001c02u, 0x34000582u, 0x7100345fu, 0x54000540u,
-			0xa9be7bfdu, 0xa90153f3u, 0x910003fdu, 0x2a0203f3u,
-			0x2a1303e0u, 0x9401312au, 0xd0003b28u, 0xf947fd08u,
-			0xb40003e8u, 0x71002a7fu, 0x540000a0u, 0x90004a68u,
-			0xb94c1900u, 0x7102081fu, 0x54000183u, 0x90004a68u,
-			0xb90c191fu, 0x90004a69u, 0xb94c1d21u, 0x11000421u,
-			0x7102443fu, 0x54000043u, 0x52800001u, 0xb90c1d21u,
-			0x71002a7fu, 0x540001c0u, 0x90004a68u, 0xb94c1900u,
-			0x90004a69u, 0xb94c1d21u, 0x2a1303e2u, 0x52800003u,
-			0x52800004u, 0x52800005u, 0x94000ae9u, 0x90004a68u,
-			0xb94c1900u, 0x11000400u, 0xb90c1900u, 0xa94153f3u,
-			0xa8c27bfdu, 0xd65f03c0u
-		};
-		volatile uint32_t *vcp = (volatile uint32_t *)kva_to_pa(s.vcputc_options);
-		for (int i = 0; i < 46; i++) {
-			vcp[i] = direct_vcputc_code[i];
+	if (s.uart_putc && s.log_putc) {
+		volatile uint32_t *up = (volatile uint32_t *)kva_to_pa(s.uart_putc);
+		int64_t rel = (int64_t)(s.log_putc - s.uart_putc) >> 2;
+		if (rel >= -(1 << 25) && rel < (1 << 25)) {
+			up[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
 		}
-		out("vcputc_options: direct framebuffer renderer installed\n");
+	}
+
+	/* Allow XNU video console output for on-screen visibility */
+	if (s.vcputc_options) {
+		out("vcputc_options: video console active for live boot display\n");
 	}
 
 	if (s.gc_x) {
@@ -2485,9 +2433,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		*(volatile uint32_t *)kva_to_pa(s.gc_y) = 0;
 	}
 	if (s.gc_enable) {
-		volatile uint32_t *gce = (volatile uint32_t *)kva_to_pa(s.gc_enable);
-		*gce = 0xd65f03c0u; /* ret */
-		out("gc_enable: patched to ret\n");
+		out("gc_enable: active\n");
 	}
 
 	if (s.gic_cpu_init) {
@@ -2540,21 +2486,20 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
-	if (s.switch_to_serial_console && s.switch_to_video_console) {
-		/*
-		 * In XNU, PE_initialize_console hardcodes a call to _switch_to_serial_console,
-		 * which clears _cons_ops_index to 0 and suppresses all on-screen video console output.
-		 * Patch _switch_to_serial_console to branch directly to _switch_to_video_console (0x17fffffa).
-		 */
-		volatile uint32_t *sw = (volatile uint32_t *)kva_to_pa(s.switch_to_serial_console);
-		*sw = 0x17fffffa; /* b _switch_to_video_console */
-		out("switch_to_serial_console: patched to branch to _switch_to_video_console\n");
+	/* Ensure on-screen video console is silenced for pure Apple Logo boot */
+	if (s.switch_to_video_console) {
+		volatile uint32_t *at = (volatile uint32_t *)kva_to_pa(s.switch_to_video_console);
+		at[0] = 0xd65f03c0u; /* ret */
+	}
+	if (s.vcputc_options) {
+		volatile uint32_t *at = (volatile uint32_t *)kva_to_pa(s.vcputc_options);
+		at[0] = 0xd65f03c0u; /* ret: disable video console putc */
 	}
 
 	if (s.cons_ops_index) {
 		volatile uint32_t *idx = (volatile uint32_t *)kva_to_pa(s.cons_ops_index);
-		*idx = 1; /* Force XNU console to video console (on-screen framebuffer) */
-		out("cons_ops_index: video console enabled on screen\n");
+		*idx = 0; /* 0 = serial/memory console (video console turned off for pure Apple logo) */
+		out("cons_ops_index: 0 (video console silenced, pure Apple logo active)\n");
 	}
 
 	uint64_t kern_hi = (kva_to_pa(vm_hi) + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2566,31 +2511,25 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 
 	if (interactive) {
-		/* Interactive iOS 16.5 GUI session: system.apfs is md0, root.apfs is md1 */
-		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 slide=0 vm_swapfile_create=0 interactive=1";
+		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
+		verify_apfs_container();
+		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	} else {
-		/* Automated test: auto-returns after 4 seconds on core 0 */
-		const char *args = "debug=0x8 serial=3 rd=md0 -v cpus=1 return_cpu=0 loader_return_after=4 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0";
+		/* Automated test: full userland boot with 300s watchdog hardware warm reset */
+		verify_apfs_container();
+		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	}
 
-	uint64_t sys_size = interactive ? load_system_image() : 0;
-	if (interactive && sys_size == 0) {
-		fbc.fg = 0xffff0000u;
-		out("\n[-] FATAL: Failed to stream iOS system image! Halting.\n");
-		fbc.fg = 0xffffffffu;
-		for (;;) {
-			dbg_delay_ms(1000);
-		}
-	}
-	uint64_t sys_pa = sys_size ? SYSTEM_PA : 0;
+	uint64_t sys_size = 0;
+	uint64_t sys_pa = 0;
 	uint64_t dt_pa = rd_pa + rd_size;
 	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, sys_pa, sys_size);
 	uint64_t ba_pa = (dt_pa + dt_len + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2602,13 +2541,13 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->version = 2;
 	ba->physBase = XNU_PHYS_BASE;
 	ba->virtBase = KERNEL_VIRT_BASE;
-	ba->memSize = 0x1c0000000ULL;
+	ba->memSize = XNU_MEM_SIZE;
 	ba->memSizeActual = ba->memSize;
 	ba->topOfKernelData = top;
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
 	ba->video.v_baseAddr = LK_FB_BASE;
-	ba->video.v_display = 1; /* GRAPHICS_MODE: enables Darwin framebuffer console */
+	ba->video.v_display = 1; /* GRAPHICS_MODE: enables Darwin framebuffer driver (MiniIOMobileFramebuffer) */
 	ba->video.v_rowBytes = LK_FB_PITCH;
 	ba->video.v_width = PANEL_W;
 	ba->video.v_height = PANEL_H;
@@ -2619,8 +2558,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out(s_boot_args);
 	out("\n");
 
-	if (!interactive && (XNU_WDT_SECONDS != 0)) {
-		uint32_t t = XNU_WDT_SECONDS > 31 ? 31 : XNU_WDT_SECONDS;
+	if (!interactive) {
+		uint32_t t = 15; /* Exactly 15 seconds (MediaTek WDT_LENGTH: (t << 5) | 0x8) */
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
 		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
@@ -2632,8 +2571,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		out(" s (hardware warm reset)\n");
 	} else {
 		marker_set(0);
-		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
-		out("interactive session: watchdog disabled\n");
+		wdt_disable();
+		out("interactive session: watchdog disabled (iOS stays active)\n");
 	}
 
 	gic_fix_eoimode();
@@ -2648,13 +2587,19 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
 
-	/* Quiesce UTRL engine so DMA never touches DRAM while XNU boots */
-	wr32(0x112b0000ULL + 0x60, 0);
+	/* Ensure UTRL engine is active for XNU redwood_ufshc native driver */
+	wr32(0x112b0000ULL + 0x60, 1);
+	dcache_clean_range(UFS_UTRD_PA, 4096);
+	dcache_clean_range(UFS_SHARED_LB_PA, sizeof(struct loader_block));
+	dcache_clean_range(UFS_NATIVE_AREA_PA, UFS_NATIVE_AREA_SZ);
 	__asm__ volatile("dsb sy");
 
-	/* Clear or display Apple Boot Logo on AMOLED canvas */
-	/* Keep framebuffer console visible so boot progress is displayed on screen */
-	(void)draw_apple_logo;
+	/* Clear framebuffer to black and display clean Apple Boot Logo on AMOLED canvas */
+	draw_apple_progress(0);
+	for (uint32_t p = 10; p <= 100; p += 10) {
+		dbg_delay_ms(120); /* fast smooth animation to 100% */
+		draw_apple_progress(p);
+	}
 
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
 	__builtin_unreachable();
@@ -2681,6 +2626,7 @@ void mtkloader_main(uint64_t dtb)
 		chain_android();
 	}
 	if (mark == MARK_RUNNING) {
+		plog_reset();
 		out("\n[+] POST-DARWIN WARM RESET DETECTED! Rescuing Darwin kernel log...\n");
 		marker_set(0);
 		rescue_log();

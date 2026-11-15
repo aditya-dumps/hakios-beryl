@@ -1,6 +1,8 @@
 # Device images & dumps (must never be committed)
 *.img
 *.bin
+*.apfs
+kernel_patched
 *.dtb
 *.dts
 fdt.*

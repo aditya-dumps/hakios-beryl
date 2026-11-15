@@ -66,8 +66,11 @@ primary_entry:
 /* jump_to_kernel(entry_pa, boot_args_pa): enter XNU at EL1h, MMU and caches off */
 jump_to_kernel:
     msr     daifset, #0xf
-    mov     x16, x0
-    mov     x0, x1
+    mov     x19, x0
+    mov     x20, x1
+    bl      dcache_clean_all
+    mov     x16, x19
+    mov     x0, x20
     mrs     x2, CurrentEL
     lsr     x2, x2, #2
     cmp     x2, #2
@@ -287,7 +290,7 @@ dcache_clean_range:
 dcache_inval_range:
     add     x1, x0, x1
     bic     x0, x0, #63
-1:  dc      ivac, x0
+1:  dc      civac, x0
     add     x0, x0, #64
     cmp     x0, x1
     b.lo    1b
@@ -413,13 +416,8 @@ mtk_vectors:
 
 /* Safe instruction cache invalidation at EL1 and EL2 */
 ic_invalidate_all:
-    mrs     x0, CurrentEL
-    lsr     x0, x0, #2
-    cmp     x0, #2
-    b.lo    1f
+    dsb     sy
     ic      iallu
-    isb
-    ret
-1:  dsb     sy
+    dsb     sy
     isb
     ret

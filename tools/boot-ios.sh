@@ -12,8 +12,10 @@ echo " [1/2] Arming Persistent iOS Boot Trigger in misc (LBA 8)"
 echo "=========================================================="
 adb -s "$S" wait-for-device
 echo "[+] Writing 'boot-ios' flag to /dev/block/by-name/misc (LBA 8)..."
-adb -s "$S" shell "su -c 'echo -n boot-ios > /dev/block/by-name/misc; sync'"
-adb -s "$S" shell "su -c 'printf DARWIN-BERYL:BOOT-IOS > /dev/pmsg0 2>/dev/null; sync'"
+adb -s "$S" shell "su -c 'echo -n boot-ios > /dev/block/by-name/misc'"
+adb -s "$S" shell "su -c 'sync'"
+adb -s "$S" shell "su -c 'printf DARWIN-BERYL:BOOT-IOS > /dev/pmsg0 2>/dev/null'"
+adb -s "$S" shell "su -c 'sync'"
 echo "[+] Flag verified in misc:"
 adb -s "$S" shell "su -c 'xxd -l 16 /dev/block/by-name/misc'"
 

@@ -229,6 +229,10 @@ static inline void fbcon_putc(char c)
 		fbcon_newline();
 		return;
 	}
+	if (c == '\r') {
+		fbc.x = 24;
+		return;
+	}
 	if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) {
 		c = '?';
 	}

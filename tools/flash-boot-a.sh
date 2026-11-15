@@ -25,7 +25,7 @@ ADB_STATE=$(adb -s "$S" get-state 2>/dev/null || true)
 if [ "$ADB_STATE" = "device" ]; then
     echo "Device detected in ADB mode."
     adb -s "$S" push "$IMG" /data/local/tmp/target_boot.img
-    adb -s "$S" shell "su -c 'dd if=/data/local/tmp/target_boot.img of=/dev/block/by-name/boot_a bs=4096 && sync'"
+    adb -s "$S" shell "su -c 'dd if=/data/local/tmp/target_boot.img of=/dev/block/by-name/boot_a bs=4096 conv=fsync'"
     adb -s "$S" shell rm /data/local/tmp/target_boot.img
     echo "== boot_a flashed successfully via ADB =="
     exit 0

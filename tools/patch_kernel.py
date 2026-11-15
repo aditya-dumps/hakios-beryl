@@ -27,6 +27,26 @@ if inst2 == 0x540001e1:
 else:
     print("[*] 0x7c2150 already patched (nop)")
 
+# Check offset 0x79f3bc (_cs_invalid_page entry)
+# Patch with:
+#   mov w0, #0 (0x52800000)
+#   ret        (0xd65f03c0)
+# This prevents clearing CS_VALID and prevents dyld abort (namespace 2 subcode 0xa)
+inst3 = struct.unpack_from("<I", kdata, 0x79f3bc)[0]
+if inst3 != 0x52800000:
+    struct.pack_into("<II", kdata, 0x79f3bc, 0x52800000, 0xd65f03c0)
+    print("[+] Patched 0x79f3bc (_cs_invalid_page -> mov w0, #0; ret)")
+else:
+    print("[*] 0x79f3bc already patched (_cs_invalid_page)")
+
+# Check offset 0x7dd3c0 (_psignal_internal panic on unexpected SIGKILL of init)
+inst4 = struct.unpack_from("<I", kdata, 0x7dd3c0)[0]
+if inst4 == 0x940b9f12:
+    struct.pack_into("<I", kdata, 0x7dd3c0, 0xd503201f)
+    print("[+] Patched 0x7dd3c0 (_psignal_internal unexpected SIGKILL panic -> nop)")
+else:
+    print("[*] 0x7dd3c0 already patched (nop)")
+
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
 print(f"[+] Saved patched kernel to {KERNEL_PATH}")
