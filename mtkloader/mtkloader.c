@@ -248,7 +248,7 @@ struct payload_info {
 
 struct xnu_syms {
 	uint64_t stub_slot, vc_colors, log, log_len, log_ring_at, log_wrapped, panic_str, panic_args, iso_font,
-	    msgbufp, msgbuf, cpu_ttep, live, uart_tx_ready, uart_tx_data, uart_rx_ready, uart_putc, uart_putc_options, log_putc,
+	    msgbufp, msgbuf, cpu_ttep, kernel_pmap, live, uart_tx_ready, uart_tx_data, uart_rx_ready, uart_putc, uart_putc_options, log_putc,
 	    nprocs, tasks_count, initproc, gic_cpu_init,
 	    gic_unhandled_count, gic_last_unhandled, gic_active_iar, host_keep, host_keep_len, host_keep_dropped,
 	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump, cons_ops_index,
@@ -463,7 +463,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 	static const char *const names[] = {
 		"_loader_stub_slot", "_vc_colors", "_loader_log", "_loader_log_len", "_loader_log_ring_at",
 		"_loader_log_wrapped", "_debugger_panic_str", "_debugger_panic_args", "_iso_font",
-		"_msgbufp", "_msgbuf", "_cpu_ttep", "_loader_live",
+		"_msgbufp", "_msgbuf", "_cpu_ttep", "_kernel_pmap", "_loader_live",
 		"_vmapple_uart_transmit_ready", "_vmapple_uart_transmit_data",
 		"_vmapple_uart_receive_ready", "_uart_putc", "_uart_putc_options", "_loader_log_putc",
 		"_nprocs", "_tasks_count", "_initproc", "_gic_v3_irq_cpu_init",
@@ -839,7 +839,10 @@ void loader_fault(uint64_t vec, uint64_t esr, uint64_t elr, uint64_t far)
 
 static inline uint64_t sanitize_kva(uint64_t va)
 {
-	/* Canonical Darwin kernel VA: bits 63..40 are always 0xfffffff0 */
+	/* Strip PAC tag bits if set: valid KVA has upper bits set */
+	if ((va >> 48) == 0xffff || (va >> 48) == 0x0000) {
+		return va | 0xffff000000000000ULL;
+	}
 	if ((va & 0x000000f000000000ULL) == 0x000000f000000000ULL) {
 		return 0xfffffff000000000ULL | (va & 0xffffffffffULL);
 	}
@@ -1334,6 +1337,10 @@ static void rescue_state(void)
 {
 	if (xsyms.cpu_ttep) {
 		xnu_fp[3] = rd32(kva_to_pa(xsyms.cpu_ttep)) | (uint64_t)rd32(kva_to_pa(xsyms.cpu_ttep) + 4) << 32;
+		xnu_fp[2] = 0x22a51a251aULL;
+	}
+	if (!xnu_fp[3] && xsyms.kernel_pmap) {
+		xnu_fp[3] = *(volatile uint64_t *)kva_to_pa(xsyms.kernel_pmap);
 		xnu_fp[2] = 0x22a51a251aULL;
 	}
 	out("cpu_ttep ");
@@ -2486,20 +2493,11 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
-	/* Ensure on-screen video console is silenced for pure Apple Logo boot */
-	if (s.switch_to_video_console) {
-		volatile uint32_t *at = (volatile uint32_t *)kva_to_pa(s.switch_to_video_console);
-		at[0] = 0xd65f03c0u; /* ret */
-	}
-	if (s.vcputc_options) {
-		volatile uint32_t *at = (volatile uint32_t *)kva_to_pa(s.vcputc_options);
-		at[0] = 0xd65f03c0u; /* ret: disable video console putc */
-	}
-
+	/* Enable on-screen video console for live boot display */
 	if (s.cons_ops_index) {
 		volatile uint32_t *idx = (volatile uint32_t *)kva_to_pa(s.cons_ops_index);
-		*idx = 0; /* 0 = serial/memory console (video console turned off for pure Apple logo) */
-		out("cons_ops_index: 0 (video console silenced, pure Apple logo active)\n");
+		*idx = 1; /* 1 = video console active */
+		out("cons_ops_index: 1 (video console active for live boot display)\n");
 	}
 
 	uint64_t kern_hi = (kva_to_pa(vm_hi) + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2513,7 +2511,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
+		const char *args = "debug=0x8 serial=3 -v rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2521,7 +2519,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	} else {
 		/* Automated test: full userland boot with 300s watchdog hardware warm reset */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
+		const char *args = "debug=0x8 serial=3 -v rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2547,7 +2545,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
 	ba->video.v_baseAddr = LK_FB_BASE;
-	ba->video.v_display = 1; /* GRAPHICS_MODE: enables Darwin framebuffer driver (MiniIOMobileFramebuffer) */
+	ba->video.v_display = 0; /* TEXT_MODE: live on-screen text boot output; MiniIOMobileFramebuffer switches to graphics */
 	ba->video.v_rowBytes = LK_FB_PITCH;
 	ba->video.v_width = PANEL_W;
 	ba->video.v_height = PANEL_H;
@@ -2559,7 +2557,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out("\n");
 
 	if (!interactive) {
-		uint32_t t = 15; /* Exactly 15 seconds (MediaTek WDT_LENGTH: (t << 5) | 0x8) */
+		uint32_t t = 300; /* 300 seconds (5 min) hardware warm reset timeout */
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
 		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
@@ -2597,7 +2595,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	/* Clear framebuffer to black and display clean Apple Boot Logo on AMOLED canvas */
 	draw_apple_progress(0);
 	for (uint32_t p = 10; p <= 100; p += 10) {
-		dbg_delay_ms(120); /* fast smooth animation to 100% */
+		dbg_delay_ms(15); /* fast smooth animation to 100% */
 		draw_apple_progress(p);
 	}
 
@@ -2696,16 +2694,16 @@ void mtkloader_main(uint64_t dtb)
 		interactive = 1;
 	} else if (s_usb_xnu_trigger == 1) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / XNU (automated test)...\n");
+		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / iOS (Interactive)...\n");
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
-		interactive = 0;
+		interactive = 1;
 	} else if (pmsg_trig) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] PMSG TRIGGER FOUND! Booting Darwin / XNU (automated test)...\n");
+		out("\n[+] PMSG TRIGGER FOUND! Booting Darwin / iOS (Interactive)...\n");
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
-		interactive = 0;
+		interactive = 1;
 	} else if (vol_down || vol_up) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
 		out("\n[+] VOLUME BUTTON DETECTED! Booting iOS / Darwin (Interactive Dual-Boot)...\n");
