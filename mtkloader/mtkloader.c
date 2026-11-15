@@ -619,7 +619,9 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_str(&w, "darwin-board", "beryl");
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", XNU_PHYS_BASE);
-	dt_prop_u64(&w, "dram-size", XNU_MEM_SIZE);
+	dt_prop_u64(&w, "dram-size", 0x1c0000000ULL);
+	dt_prop_u64(&w, "time-base", 1794707662ULL);
+	dt_prop_u32(&w, "interrupt-controller", 0x10);
 	dt_prop_u32(&w, "debug-enabled", 1);
 	dt_prop_u32(&w, "display-scale", 2);
 	dt_prop_u32(&w, "display-rotation", 0);
@@ -668,10 +670,6 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	} else if (rd_size != 0) {
 		uint64_t rd_reg[2] = { rd_pa, rd_size };
 		dt_prop(&w, "RAMDisk", rd_reg, sizeof(rd_reg));
-	}
-	if (sys_size != 0) {
-		uint64_t sys_reg[2] = { sys_pa, sys_size };
-		dt_prop(&w, "SystemDisk", sys_reg, sizeof(sys_reg));
 	}
 	dt_end(&w);
 	dt_end(&w); /* chosen */
@@ -2157,8 +2155,7 @@ static void hw_probes(void)
 			out("UFS: Trigger cleared in misc partition.\n");
 		}
 
-		/* Quiesce UTRL engine so DMA never touches DRAM while XNU boots */
-		wr32(0x112b0000ULL + 0x60, 0);
+		/* Leave UTRL running for load_system_image; quiesced before jump_to_kernel */
 	}
 
 	/* Touch I2C Controller (0x11ed0000) */
@@ -2213,12 +2210,181 @@ static void hw_probes(void)
 	}
 }
 
+/* ---- iOS 16.5 System Image Streaming ---- */
+
+#include "apple_logo.h"
+
+
+static void draw_apple_logo(void)
+{
+	if (!fbc.base) return;
+	memset((void *)LK_FB_BASE, 0, FB_SCREEN_SIZE);
+
+	uint32_t x_off = (PANEL_W - APPLE_LOGO_W) / 2;
+	uint32_t y_off = (PANEL_H - APPLE_LOGO_H) / 2;
+
+	for (uint32_t y = 0; y < APPLE_LOGO_H; y++) {
+		for (uint32_t x = 0; x < APPLE_LOGO_W; x++) {
+			uint32_t idx = y * APPLE_LOGO_W + x;
+			if ((apple_logo_bitmap[idx >> 3] >> (7 - (idx & 7))) & 1) {
+				fb_px(x_off + x, y_off + y, 0xffffffffu);
+			}
+		}
+	}
+	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	__asm__ volatile("dsb sy");
+}
+
+static uint64_t load_system_image(void)
+{
+	uint32_t *ufs_utrd = (uint32_t *)0x60000000ULL;
+	uint8_t *ufs_ucd = (uint8_t *)0x60001000ULL;
+	uint8_t *ufs_buf = (uint8_t *)0x60010000ULL;
+	uint64_t total_blocks = SYS_UFS_BLOCKS;
+	uint64_t lba = SYS_UFS_LBA_START;
+	uint64_t dst = SYSTEM_PA;
+	uint64_t total_bytes = total_blocks * 4096ULL;
+
+	wdt_disable();
+	out("\n=======================================================\n");
+	out(" [HakiOS] Streaming iOS 16.5 System Container to DRAM\n");
+	out(" Source:   UFS LBA 61689024 (2.47 GB, 604671 blocks)\n");
+	out(" Target:   DRAM 0x140000000 (RAMDisk /dev/md0)\n");
+	out("=======================================================\n");
+
+	/* Verify superblock first */
+	uint8_t read_sb[10] = {
+		0x28, 0,
+		(uint8_t)(SYS_UFS_LBA_START >> 24),
+		(uint8_t)(SYS_UFS_LBA_START >> 16),
+		(uint8_t)(SYS_UFS_LBA_START >> 8),
+		(uint8_t)SYS_UFS_LBA_START,
+		0, 0, 1, 0
+	};
+	RUN_SCSI("READ(10)_NXSB", 2, read_sb, 10, ufs_buf, 4096, 1);
+	if (ufs_buf[32] != 'N' || ufs_buf[33] != 'X' || ufs_buf[34] != 'S' || ufs_buf[35] != 'B') {
+		fbc.fg = 0xffff0000u; /* RED */
+		out("[-] ERROR: APFS Container Superblock (NXSB) not found at LBA 61689024!\n");
+		fbc.fg = 0xffffffffu;
+		return 0;
+	}
+	fbc.fg = 0xff00ff00u; /* GREEN */
+	out("[+] APFS Superblock verified (NXSB). Starting high-speed streaming...\n");
+	fbc.fg = 0xffffffffu;
+
+	uint64_t blocks_left = total_blocks;
+	uint64_t cur_lba = lba;
+	uint64_t cur_dst = dst;
+	int last_pct = -1;
+
+	while (blocks_left > 0) {
+		uint32_t chunk_blocks = blocks_left > 16 ? 16 : (uint32_t)blocks_left;
+		uint32_t chunk_bytes = chunk_blocks * 4096;
+
+		memset(ufs_utrd, 0, 1024);
+		memset(ufs_ucd, 0, 2048);
+
+		ufs_ucd[0] = 0x01; /* UPIU_COMMAND */
+		ufs_ucd[1] = 0x40; /* Data In (read) */
+		ufs_ucd[2] = 2;    /* LUN 2 */
+		ufs_ucd[3] = 0;
+		ufs_ucd[12] = (uint8_t)(chunk_bytes >> 24);
+		ufs_ucd[13] = (uint8_t)(chunk_bytes >> 16);
+		ufs_ucd[14] = (uint8_t)(chunk_bytes >> 8);
+		ufs_ucd[15] = (uint8_t)chunk_bytes;
+
+		ufs_ucd[16] = 0x28; /* READ(10) */
+		ufs_ucd[17] = 0;
+		ufs_ucd[18] = (uint8_t)(cur_lba >> 24);
+		ufs_ucd[19] = (uint8_t)(cur_lba >> 16);
+		ufs_ucd[20] = (uint8_t)(cur_lba >> 8);
+		ufs_ucd[21] = (uint8_t)cur_lba;
+		ufs_ucd[22] = 0;
+		ufs_ucd[23] = (uint8_t)(chunk_blocks >> 8);
+		ufs_ucd[24] = (uint8_t)chunk_blocks;
+		ufs_ucd[25] = 0;
+
+		uint32_t *p = (uint32_t *)(ufs_ucd + 1024);
+		p[0] = (uint32_t)(uintptr_t)ufs_buf;
+		p[1] = (uint32_t)((uint64_t)(uintptr_t)ufs_buf >> 32);
+		p[2] = 0;
+		p[3] = chunk_bytes - 1;
+
+		ufs_utrd[0] = (1u << 28) | (1u << 24) | (2u << 25);
+		ufs_utrd[1] = 0;
+		ufs_utrd[2] = 0x0f;
+		ufs_utrd[3] = 0;
+		ufs_utrd[4] = (uint32_t)(uintptr_t)ufs_ucd;
+		ufs_utrd[5] = (uint32_t)((uint64_t)(uintptr_t)ufs_ucd >> 32);
+		ufs_utrd[6] = ((512 / 4) << 16) | (512 / 4);
+		ufs_utrd[7] = ((1024 / 4) << 16) | 1u;
+
+		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+		dcache_clean_range((uint64_t)(uintptr_t)ufs_utrd, 1024);
+		dcache_clean_range((uint64_t)(uintptr_t)ufs_ucd, 2048);
+		__asm__ volatile ("dsb sy" ::: "memory");
+
+		rd32(0x112b0000ULL + 0x38);
+		wr32(0x112b0000ULL + 0x20, rd32(0x112b0000ULL + 0x20));
+		wr32(0x112b0000ULL + 0x58, 1);
+
+		for (int t = 0; t < 5000000; t++) {
+			if ((rd32(0x112b0000ULL + 0x58) & 1) == 0) break;
+		}
+
+		__asm__ volatile ("dsb sy" ::: "memory");
+		dcache_inval_range((uint64_t)(uintptr_t)ufs_utrd, 1024);
+		dcache_inval_range((uint64_t)(uintptr_t)ufs_ucd, 2048);
+		dcache_inval_range((uint64_t)(uintptr_t)ufs_buf, chunk_bytes);
+		__asm__ volatile ("dsb sy" ::: "memory");
+
+		uint32_t ocs = ufs_utrd[2] & 0xff;
+		if (ocs != 0) {
+			fbc.fg = 0xffff0000u;
+			out("[-] UFS Read Error at LBA ");
+			out_dec((uint32_t)cur_lba);
+			out(": OCS=");
+			out_hex(ocs);
+			out("\n");
+			fbc.fg = 0xffffffffu;
+			return 0;
+		}
+
+		memcpy((void *)cur_dst, ufs_buf, chunk_bytes);
+
+		cur_lba += chunk_blocks;
+		cur_dst += chunk_bytes;
+		blocks_left -= chunk_blocks;
+
+		int pct = (int)(((total_blocks - blocks_left) * 100) / total_blocks);
+		if (pct != last_pct && (pct % 10 == 0 || pct == 100)) {
+			last_pct = pct;
+			fbc.fg = 0xff00ffffu; /* CYAN */
+			out("[+] Streaming system.apfs: ");
+			out_dec((uint32_t)pct);
+			out("% (");
+			out_dec((uint32_t)((total_blocks - blocks_left) * 4096 / (1024 * 1024)));
+			out(" MB / 2477 MB)\n");
+			fbc.fg = 0xffffffffu;
+		}
+	}
+
+	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+	__asm__ volatile ("dsb sy" ::: "memory");
+
+	fbc.fg = 0xff00ff00u; /* GREEN */
+	out("[+] iOS 16.5 System Image streaming COMPLETE! (2477 MB in DRAM)\n");
+	fbc.fg = 0xffffffffu;
+	return total_bytes;
+}
+
 /* ---- Start XNU ---- */
 
 static void __attribute__((noreturn)) run_xnu(int interactive)
 {
 	struct payload_info pi;
 	struct xnu_syms s;
+
 
 	if (!parse_payload(&pi)) {
 		out("ERROR: no XNU payload in this image\n");
@@ -2400,7 +2566,6 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 
 	if (interactive) {
-		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 interactive=1";
 		/* Interactive iOS 16.5 GUI session: system.apfs is md0, root.apfs is md1 */
 		const char *args = "debug=0x8 serial=0 rd=md0 -v cpus=8 small_cores_after=0 slide=0 vm_swapfile_create=0 interactive=1";
 		size_t l = strlen(args);
@@ -2427,7 +2592,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 	uint64_t sys_pa = sys_size ? SYSTEM_PA : 0;
 	uint64_t dt_pa = rd_pa + rd_size;
-	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, 0, 0);
+	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, sys_pa, sys_size);
 	uint64_t ba_pa = (dt_pa + dt_len + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
 	uint64_t top = ba_pa + PAGE_SIZE_MAX;
 
@@ -2437,9 +2602,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->version = 2;
 	ba->physBase = XNU_PHYS_BASE;
 	ba->virtBase = KERNEL_VIRT_BASE;
-	ba->memSize = XNU_MEM_SIZE;
-	ba->memSizeActual = XNU_MEM_SIZE;
 	ba->memSize = 0x1c0000000ULL;
+	ba->memSizeActual = ba->memSize;
 	ba->topOfKernelData = top;
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
@@ -2484,9 +2648,11 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
 
-	/* Clear framebuffer so Darwin XNU starts on a fresh, clean AMOLED canvas */
-		memset((void *)LK_FB_BASE, 0, FB_SCREEN_SIZE);
-		dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	/* Quiesce UTRL engine so DMA never touches DRAM while XNU boots */
+	wr32(0x112b0000ULL + 0x60, 0);
+	__asm__ volatile("dsb sy");
+
+	/* Clear or display Apple Boot Logo on AMOLED canvas */
 	/* Keep framebuffer console visible so boot progress is displayed on screen */
 	(void)draw_apple_logo;
 
