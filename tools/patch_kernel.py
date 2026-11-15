@@ -47,6 +47,39 @@ if inst4 == 0x940b9f12:
 else:
     print("[*] 0x7dd3c0 already patched (nop)")
 
+# Check offsets for pmap_enter over-unwire / over-release panic assertions:
+# 0x43d65c: b.le #0xfffffff007441948 (over-release assertion) -> nop
+inst_pm1 = struct.unpack_from("<I", kdata, 0x43d65c)[0]
+if inst_pm1 == 0x5400176d:
+    struct.pack_into("<I", kdata, 0x43d65c, 0xd503201f)
+    print("[+] Patched 0x43d65c (pmap_enter over-release b.le -> nop)")
+else:
+    print("[*] 0x43d65c already patched")
+
+# 0x43d67c: b.le #0xfffffff007441920 (over-unwire assertion) -> nop
+inst_pm2 = struct.unpack_from("<I", kdata, 0x43d67c)[0]
+if inst_pm2 == 0x5400152d:
+    struct.pack_into("<I", kdata, 0x43d67c, 0xd503201f)
+    print("[+] Patched 0x43d67c (pmap_enter over-unwire b.le -> nop)")
+else:
+    print("[*] 0x43d67c already patched")
+
+# 0x43d944: bl _panic (pmap_enter over-unwire panic call) -> nop
+inst_pm3 = struct.unpack_from("<I", kdata, 0x43d944)[0]
+if inst_pm3 == 0x941a1db1:
+    struct.pack_into("<I", kdata, 0x43d944, 0xd503201f)
+    print("[+] Patched 0x43d944 (pmap_enter over-unwire bl _panic -> nop)")
+else:
+    print("[*] 0x43d944 already patched")
+
+# 0x43d96c: bl _panic (pmap_enter over-release panic call) -> nop
+inst_pm4 = struct.unpack_from("<I", kdata, 0x43d96c)[0]
+if inst_pm4 == 0x941a1da7:
+    struct.pack_into("<I", kdata, 0x43d96c, 0xd503201f)
+    print("[+] Patched 0x43d96c (pmap_enter over-release bl _panic -> nop)")
+else:
+    print("[*] 0x43d96c already patched")
+
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
 print(f"[+] Saved patched kernel to {KERNEL_PATH}")
