@@ -163,14 +163,10 @@ if inst_ut == 0x34000108:
 else:
     print(f"[*] 0x47234c check: {hex(inst_ut)}")
 
-# Bypass panic on PID 1 exit:
-# 0x7c3d94 (bl _panic_with_options -> b .)
-inst_pe = struct.unpack_from("<I", kdata, 0x7c3d94)[0]
-if inst_pe == 0x940c04b2:
-    struct.pack_into("<I", kdata, 0x7c3d94, 0x14000000)
-    print("[+] Patched 0x7c3d94 (PID 1 exit panic -> b . spin)")
-else:
-    print(f"[*] 0x7c3d94 check: {hex(inst_pe)}")
+# Ensure PID 1 exit outputs full panic report to pmsg instead of infinite hang:
+# 0x7c3d94 (bl _panic_with_options: 0x940c04b2)
+struct.pack_into("<I", kdata, 0x7c3d94, 0x940c04b2)
+print("[+] Restored 0x7c3d94 (bl _panic_with_options for full diagnostic panic dump)")
 
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)

@@ -2557,7 +2557,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out("\n");
 
 	if (!interactive) {
-		uint32_t t = 180; /* 180 seconds (3 min) hardware warm reset timeout */
+		uint32_t t = 45; /* 45 seconds hardware warm reset timeout for fast test turnaround */
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
 		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);

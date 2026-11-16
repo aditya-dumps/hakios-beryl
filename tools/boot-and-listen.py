@@ -35,6 +35,13 @@ def main():
     print(f"[+] Rebooting into iOS / Darwin (trigger: {trigger})...")
     subprocess.run(f"adb -s {SERIAL} shell \"su -c 'reboot'\" 2>/dev/null || adb -s {SERIAL} reboot 2>/dev/null || true", shell=True)
 
+    print(f"[*] Waiting for device {SERIAL} to disconnect...")
+    for _ in range(40):
+        time.sleep(0.5)
+        res = subprocess.run(f"adb -s {SERIAL} get-state 2>&1", shell=True, capture_output=True, text=True)
+        if "device" not in res.stdout:
+            break
+
     print(f"[*] Device disconnected. iOS boot active! Listening for Android reboot on {SERIAL}...")
     subprocess.run(f"adb -s {SERIAL} wait-for-device", shell=True)
 
