@@ -114,6 +114,58 @@ if inst_zi == 0x377000d8:
 else:
     print(f"[*] 0x346944 check: {hex(inst_zi)}")
 
+# Code Signing Page Validation Bypass:
+# 0x8214d8 (_cs_validate_page):
+#   mov w8, #0xf (0x528001e8)  ; *validated_p = 0xf (all 4 4KB subpages valid)
+#   str w8, [x4] (0xb9000088)
+#   str wzr, [x5] (0xb90000bf) ; *tainted_p = 0
+#   str wzr, [x6] (0xb90000df) ; *nx_p = 0
+#   mov w0, #0 (0x52800000)    ; return KERN_SUCCESS
+#   ret (0xd65f03c0)
+inst_cs = struct.unpack_from("<I", kdata, 0x8214d8)[0]
+if inst_cs != 0x528001e8:
+    struct.pack_into("<6I", kdata, 0x8214d8,
+                     0x528001e8, 0xb9000088, 0xb90000bf, 0xb90000df, 0x52800000, 0xd65f03c0)
+    print("[+] Patched 0x8214d8 (_cs_validate_page -> mark valid, untainted, non-nx, KERN_SUCCESS)")
+else:
+    print("[*] 0x8214d8 already patched (_cs_validate_page)")
+
+# Exception Triage Verbose Logging:
+# 0x2d1d6c (exception_triage_thread b.hi -> nop)
+inst_et = struct.unpack_from("<I", kdata, 0x2d1d6c)[0]
+if inst_et == 0x54000328:
+    struct.pack_into("<I", kdata, 0x2d1d6c, 0xd503201f)
+    print("[+] Patched 0x2d1d6c (exception_triage_thread b.hi -> nop, log all exceptions)")
+else:
+    print(f"[*] 0x2d1d6c check: {hex(inst_et)}")
+
+# Disable Core Dump in exit_with_reason:
+# 0x7c3ce8 (bl coredump -> nop)
+inst_cd = struct.unpack_from("<I", kdata, 0x7c3ce8)[0]
+if inst_cd == 0x9400079a:
+    struct.pack_into("<I", kdata, 0x7c3ce8, 0xd503201f)
+    print("[+] Patched 0x7c3ce8 (exit_with_reason bl coredump -> nop)")
+else:
+    print(f"[*] 0x7c3ce8 check: {hex(inst_cd)}")
+
+# Enable full usertrap diagnostic printing:
+# 0x47234c (cbz w8, ... -> nop)
+inst_ut = struct.unpack_from("<I", kdata, 0x47234c)[0]
+if inst_ut == 0x34000108:
+    struct.pack_into("<I", kdata, 0x47234c, 0xd503201f)
+    print("[+] Patched 0x47234c (usertrap trace cbz -> nop, print full user trap registers and PC)")
+else:
+    print(f"[*] 0x47234c check: {hex(inst_ut)}")
+
+# Bypass panic on PID 1 exit:
+# 0x7c3d94 (bl _panic_with_options -> b .)
+inst_pe = struct.unpack_from("<I", kdata, 0x7c3d94)[0]
+if inst_pe == 0x940c04b2:
+    struct.pack_into("<I", kdata, 0x7c3d94, 0x14000000)
+    print("[+] Patched 0x7c3d94 (PID 1 exit panic -> b . spin)")
+else:
+    print(f"[*] 0x7c3d94 check: {hex(inst_pe)}")
+
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
 print(f"[+] Saved patched kernel to {KERNEL_PATH}")
