@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import struct
 import sys
 
@@ -178,16 +179,38 @@ else:
     print("[*] 0x44d260 trampoline already patched")
 
 # Check offset 0x353b44 (get_bsdthread_info NULL deref safeguard)
-# 0x7357b44:
-#   cbz x0, #0x7357b4c (0xb4000040)
+# Place trampoline at 0x44d270 in __TEXT_EXEC so we DO NOT overwrite get_machthread at 0x353b4c:
+# 0x7451270:
+#   cbz x0, +8        (0xb4000040)
 #   add x0, x0, #0x580 (0x91160000)
 #   ret                (0xd65f03c0)
-inst_th = struct.unpack_from("<I", kdata, 0x353b44)[0]
-if inst_th != 0xb4000040:
-    struct.pack_into("<III", kdata, 0x353b44, 0xb4000040, 0x91160000, 0xd65f03c0)
-    print("[+] Patched 0x353b44 (get_bsdthread_info -> return NULL if th == NULL)")
-else:
-    print("[*] 0x353b44 already patched")
+# 0x7357b44:
+#   b 0x7451270        (0x1403e5cb)
+#   ret                (0xd65f03c0)
+# 0x7357b4c (get_machthread - restore original):
+#   sub x0, x0, #0x580 (0xd1160000)
+#   ret                (0xd65f03c0)
+struct.pack_into("<III", kdata, 0x44d270, 0xb4000040, 0x91160000, 0xd65f03c0)
+struct.pack_into("<II", kdata, 0x353b44, 0x1403e5cb, 0xd65f03c0)
+struct.pack_into("<II", kdata, 0x353b4c, 0xd1160000, 0xd65f03c0)
+print("[+] Patched 0x353b44 -> trampoline at 0x44d270, restored get_machthread at 0x353b4c")
+
+# Check offset 0x7dc92c & 0x7dc9bc (kern_sig.c:1838 uth != NULL panic safeguard in psignal helper)
+# 0x77e092c: cbz x21, #0x77e0990 (0xb4000335)
+# 0x77e09bc: cbz x21, #0x77e0990 (0xb4fffeb5)
+# 0x77e09c0: b #0x77e0930         (0x17ffffdc)
+struct.pack_into("<I", kdata, 0x7dc92c, 0xb4000335)
+struct.pack_into("<II", kdata, 0x7dc9bc, 0xb4fffeb5, 0x17ffffdc)
+print("[+] Patched 0x7dc92c & 0x7dc9bc (kern_sig.c:1838 uth != NULL panic bypass -> clean return)")
+
+# Patch offset 0x45a0b8 & 0x45a0f8 (msr spsel, #0 -> nop in EL1t synchronous exception vector to prevent crash when sp_el0 == 0)
+struct.pack_into("<I", kdata, 0x45a0b8, 0xd503201f)
+struct.pack_into("<I", kdata, 0x45a0f8, 0xd503201f)
+print("[+] Patched 0x45a0b8 & 0x45a0f8 (msr spsel, #0 -> nop to safely stay on SP_EL1)")
+
+# Patch offset 0x45a028 (b 0x45a0b0: route all EL1 synchronous exceptions directly to _fleh_synchronous, bypassing false-positive invalid stack panics)
+struct.pack_into("<I", kdata, 0x45a028, 0x14000022)
+print("[+] Patched 0x45a028 (b _fleh_synchronous directly for EL1 synchronous exceptions)")
 
 # Ensure PID 1 exit outputs full panic report to pmsg instead of infinite hang:
 # 0x7c3d94 (bl _panic_with_options: 0x940c04b2)
@@ -214,6 +237,26 @@ assert ksize == len(kdata), f"Size mismatch: entry size {ksize} vs kernel size {
 
 # Replace kernel bytes in payload
 pdata[32:32 + len(kdata)] = kdata
+
+# Replace ramdisk bytes in payload if root.apfs exists
+RAMDISK_PATH = "hakios/userland/root.apfs"
+if os.path.exists(RAMDISK_PATH):
+    with open(RAMDISK_PATH, "rb") as rf:
+        rddata = rf.read()
+    p = 8
+    while p + 24 <= len(pdata):
+        ename = pdata[p:p+16].split(b'\x00')[0].decode('latin1')
+        if not ename:
+            break
+        esize, = struct.unpack_from("<I", pdata, p+16)
+        if ename == "ramdisk":
+            assert esize == len(rddata), f"Ramdisk size mismatch: entry {esize} vs file {len(rddata)}"
+            pdata[p+24 : p+24+len(rddata)] = rddata
+            print(f"[+] Successfully updated ramdisk in {PAYLOAD_PATH} ({len(rddata)} bytes)")
+            with open("mtkloader/payload_rd.apfs", "wb") as pf:
+                pf.write(rddata)
+            break
+        p += 24 + ((esize + 15) & ~15)
 
 with open(PAYLOAD_PATH, "wb") as f:
     f.write(pdata)

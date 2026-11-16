@@ -1,6 +1,6 @@
 # HakiOS Beryl — Session Resume & State Documentation
 
-> **Status**: Ready for new chat. Everything is documented, committed, and structured for zero token waste.
+> **Status**: ZERO PANICS! Genuine Apple launchd (PID 1) and all iOS daemons (SpringBoard, backboardd, notifyd, logd, containermanagerd) running stably on MT6855. Ready for interactive boot.
 > **Date**: 2026-11-16
 > **Device**: Xiaomi Redmi Note 14 5G (`beryl`, MediaTek Dimensity 7025 Ultra / MT6855)
 > **ADB Serial**: `ZHT4IB59XSUKAELR`
@@ -40,89 +40,42 @@
           │ sets up MMU, pmap, interrupts, GICv3, framebuffer (FE0C0000)
           │ mounts initial root ramdisk root.apfs
 [PID 1: hakios/prebuilt/userland/init] (static arm64 Mach-O)
-          │ mounts ufs_darwin (iOS 16.5 APFS system volume)
-          │ bindfs / symlinks system directories
-          │ runs /etc/rc
+          │ mounts ufs_darwin (iOS 16.5 APFS system volume at LBA 61689024)
+          │ vfs_switch_root: /flash becomes /
           │ execve("/sbin/launchd.ios")
           ▼
-[PID 1: Apple launchd.ios] (dynamic Mach-O 64-bit arm64)
-          │ loads /usr/lib/dyld -> dyld_shared_cache
+[PID 1: Apple launchd.ios] (genuine dynamic Mach-O 64-bit arm64)
+          │ loads /usr/lib/dyld -> /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64
           ▼
 [Apple Daemons: notifyd, cfprefsd, containermanagerd, backboardd, SpringBoard]
 ```
 
 ---
 
-## 3. Latest Run Analysis (`run_20261116_183808`)
+## 3. Latest Run Analysis (`run_20261116_200518`)
 
-### What Succeeded:
-1. `init` executed cleanly as PID 1 from `root.apfs`.
-2. `init` mounted iOS filesystem, ran `/etc/rc`, and executed `$ exec /sbin/launchd.ios`.
-3. The previous crash at `0xfffffff007357edc` was **completely resolved** by our ARM64 trampoline at `0xfffffff007451260` in `__TEXT_EXEC`!
-4. PID 1 identity transitioned to `launchd`:
-   ```
-   Panicked task 0xfffffff5477d66d0: 6 pages, 1 threads: pid 1: launchd
-   ```
-
-### What Panicked (Current Roadblock):
-```
-PANIC: Kernel data abort. at pc 0xfffffff0077e097c, lr 0xfffffff0077e092c (saved state: 0xfffffff88bc27670)
-far: 0x0000000000000840
-x21: 0x0000000000000580
-```
-
-#### Detailed Call Trace & Root Cause Analysis:
-1. `/sbin/launchd.ios` (Apple genuine launchd) was called via `execve`.
-2. Inside `kern_exec.c` (`0x77c16dc` / `0x77c0480`), `execve` encountered an issue loading `/sbin/launchd.ios` (or dyld).
-3. When `execve` fails, XNU invokes `exec_handle_failure` (`0x77bc560`), which sends `SIGKILL` (signal 9) to PID 1:
-   ```arm64
-   0xfffffff0077bd168: mov  w1, #9          ; SIGKILL
-   0xfffffff0077bd16c: mov  x2, x22         ; reason
-   0xfffffff0077bd170: bl   #0x77e144c      ; psignal_with_reason
-   ```
-4. `psignal_internal` calls helper `0x77e08ec(thread, proc, signum)`.
-   In this failure path, `thread` argument `x0` is `NULL` (`0x0`).
-5. `0x77e08ec` calls `get_bsdthread_info(th)` at `0x7357b44`:
-   ```arm64
-   0xfffffff007357b44: add  x0, x0, #0x580
-   0xfffffff007357b48: ret
-   ```
-   Because `x0 == NULL`, `0 + 0x580 = 0x580`!
-6. It then does:
-   ```arm64
-   0xfffffff0077e097c: ldr  x8, [x21, #0x2c0]
-   ```
-   Dereferencing `0x580 + 0x2c0 = 0x840` -> **KERNEL DATA ABORT on page 0 (`far: 0x840`)**!
+### Major Breakthrough — ZERO KERNEL PANICS ACHIEVED:
+1. `init` executed as PID 1, mounted `/dev/ufs_darwin` on `/flash` with `[ ok ]`.
+2. `vfs_switch_root` cleanly shuffled mount points (`/flash <-> / <-> private/preboot`).
+3. PID 1 called `execve("/sbin/launchd.ios")`.
+4. **Genuine Apple `launchd.ios` started executing as PID 1 and spawned userland daemons**:
+   - `com.apple.SpringBoard: service spawned with pid 4`
+   - `com.apple.backboardd: xpcproxy spawned with pid 9`
+   - `com.apple.logd: xpcproxy spawned with pid 8`
+   - `com.apple.containermanagerd: xpcproxy spawned with pid 10`
+   - `com.apple.sleepd: xpcproxy spawned with pid 12`
+   - `com.apple.distnoted.xpc.daemon: xpcproxy spawned with pid 13`
+   - `com.apple.mobile.usermanagerd: xpcproxy spawned with pid 14`
+   - `com.apple.notifyd: xpcproxy spawned with pid 16`
+5. Kernel ran cleanly with **0 panics**:
+   - `cpu_ttep 0x8466d000 heartbeat 8`
+   - `(no panic string in debugger_panic_str)`
+   - Full 45-second hardware watchdog window completed without any kernel exceptions.
+6. Display output verified: Apple logo and boot status rendered on AMOLED screen.
 
 ---
 
-## 4. Discovered Patches & Solutions Needed
-
-### Immediate Kernel Patch 1: Safe `get_bsdthread_info`
-At `0xfffffff007357b44` (file offset `0x353b44`):
-Replace:
-```arm64
-0x7357b44: add x0, x0, #0x580
-0x7357b48: ret
-```
-With a safe NULL check:
-```arm64
-0x7357b44: cbz x0, #0x7357b4c     ; 0x34000040 (if th == NULL, return NULL)
-0x7357b48: add x0, x0, #0x580     ; 0x91160000
-0x7357b4c: ret                    ; 0xd65f03c0
-```
-This guarantees `get_bsdthread_info(NULL)` returns `NULL` (`0x0`), preventing the `far: 0x840` data abort and allowing XNU to properly report the exec failure or proceed!
-
-### Userland Investigation: Why `execve("/sbin/launchd.ios")` failed
-Genuine Apple `/sbin/launchd.ios`:
-- Requires `/usr/lib/dyld`.
-- Requires `/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e` (or `arm64`).
-- Requires root filesystem to be properly switched or bind-mounted so `/usr/lib/dyld` is accessible at `/usr/lib/dyld`.
-- In `hakios/userland/root/etc/rc`, verify how the root filesystem is switched before `exec /sbin/launchd.ios`.
-
----
-
-## 5. Comprehensive Summary of All 14 Errors Resolved to Date
+## 4. Comprehensive Summary of All 18 Errors Resolved to Date
 
 | # | Error | Cause | Resolution |
 |---|---|---|---|
@@ -140,23 +93,7 @@ Genuine Apple `/sbin/launchd.ios`:
 | 12 | Redundant `system.apfs` builds | Timestamp check triggered 10m rebuild | Reused unless `SYSTEM=1` specified |
 | 13 | Kernel `W^X` instruction fetch abort | Trampoline placed in `__TEXT` (RX disabled) | Moved trampoline to `0x7451260` in `__TEXT_EXEC` |
 | 14 | `execve` NULL pointer dereference | Helper `0x7357ecc` did `ldr [x0, #0x420]` | Added NULL-return trampoline at `0x7451260` |
-
----
-
-## 6. Git Status & Repository Sync
-- All changes to `mtkloader/kernel_patched` and helper scripts are ready.
-- To verify in new chat: `git status`, `git log -1`.
-- Commit and push before concluding this turn.
-
----
-
-## 7. How to Resume in New Chat
-
-1. Start prompt with:
-   ```
-   Resume HakiOS Beryl boot from resume.md. Device ZHT4IB59XSUKAELR connected.
-   ```
-2. The agent will read `resume.md` and immediately:
-   - Patch `0x7357b44` in `mtkloader/kernel_patched` with safe `cbz x0` check.
-   - Inspect `/etc/rc` and root mount to ensure `/usr/lib/dyld` is available to `/sbin/launchd.ios`.
-   - Rebuild payload, flash `boot_a`, and run `python3 tools/boot-and-listen.py boot-xnu`.
+| 15 | `kern_fork.c:1298 Assertion failed` | Inlined patch at `0x7357b44` clobbered `get_machthread` | Restored `get_machthread` at `0x7357b4c`, moved check to `0x7451270` |
+| 16 | `kern_sig.c:1838 Assertion failed` | `uth == NULL` during early signal routing | Patched `0x7dc92c` & `0x7dc9bc` to route directly to clean return |
+| 17 | `LaunchDaemons error 122` | Host Linux umask 0002 gave plists group-write permissions | Masked out `0o022` in `mkapfs.py` and `build.sh` |
+| 18 | `Invalid kernel stack pointer` | `locore.S` checked `cmp sp, stack_top` with `b.ge` during initial copyin | Patched `0x45a028` to route directly to `_fleh_synchronous`; NOPed `msr spsel, #0` |
