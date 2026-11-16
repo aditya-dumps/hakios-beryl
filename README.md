@@ -1,136 +1,186 @@
-# hakios-beryl: Redmi Note 14 5G (MT6855 / Dimensity 7025 Ultra)
+# HakiOS on Redmi Note 14 5G (`beryl` / MediaTek Dimensity 7025 Ultra / MT6855)
 
-Port of **HakiOS** (Apple Darwin XNU kernel `xnu-8796.121.2` and native iOS user space) to the **Redmi Note 14 5G** (`beryl`), powered by the MediaTek Dimensity 7025 Ultra (**MT6855**).
-
-This port runs Apple's open-source XNU kernel bare-metal on MediaTek silicon with custom low-level drivers, an authentic framebuffer console on the 1080×2400 panel, Samsung UFS 2.2 flash storage enumeration, FocalTech I2C touch support, and full 8-core SMP.
-
-Nothing on the device is permanently replaced: `mtkloader` is chained in `boot_a` in front of Android's genuine kernel. By default, Android boots normally with 0s delay. Holding **Volume Down** or sending a USB trigger boots iOS / Darwin.
+Port of **Apple Darwin XNU** (`xnu-8796.121.2`) and native **Apple iOS 16.5 graphical userland** (`launchd` $\to$ `backboardd` $\to$ `SpringBoard`) to the **Xiaomi Redmi Note 14 5G** (`beryl`), powered by the MediaTek MT6855 SoC.
 
 ---
 
-## Hardware Specifications
+## 1. Executive Summary & Objective
 
-| Component | Hardware Specification |
-| :--- | :--- |
-| **Phone Model** | Xiaomi Redmi Note 14 5G (`beryl`) |
-| **SoC** | MediaTek MT6855 (Dimensity 7025 Ultra, 6nm) |
-| **CPU Architecture** | 8 Cores: 2× Cortex-A78 @ 2.2 GHz + 6× Cortex-A55 @ 2.0 GHz |
-| **Interrupt Controller** | ARM GICv3 (`arm,gic-v3`), GICD @ `0x0c000000`, GICR @ `0x0c040000` |
-| **RAM** | 8 GB LPDDR4X (DRAM Base: `0x40000000`) |
-| **Storage** | 256 GB UFS 2.2 (Samsung `KM8F9001JM-B813`, Controller: `ufshci@112b0000`) |
-| **Display Panel** | 6.67" AMOLED, 1080×2400 (FHD+), 32bpp, LK Framebuffer @ `0xfe0c0000` |
-| **Touchscreen** | FocalTech FT3519T on I2C-0 (`0x11ed0000`, 7-bit addr `0x38`) |
-| **Keypad** | MediaTek Hardware Keypad (`0x1c00e000`), Volume Down / Up |
-| **GPU** | Imagination PowerVR B-Series BXM-8-256 (Rogue RGX Architecture) |
+- **Target Device**: Xiaomi Redmi Note 14 5G (`beryl`), ADB Serial: `ZHT4IB59XSUKAELR`.
+- **SoC**: MediaTek MT6855 / Dimensity 7025 Ultra (6nm, 2× Cortex-A78 @ 2.2 GHz + 6× Cortex-A55 @ 2.0 GHz).
+- **Core Mission**: Boot the authentic Apple iOS 16.5 graphical userland to SpringBoard on bare-metal MediaTek silicon.
+- **Safety Invariant**: Strictly non-destructive dual-boot. Chained `mtkloader` resides in `boot_a` while preserving genuine Xiaomi AVB footers and VBMeta. Default boot starts Android with zero delay; holding Volume Down or sending a software trigger boots Darwin / iOS.
 
 ---
 
-## Hardware Support Status
+## 2. Hardware Specifications & Board Map
 
-| Subsystem | Status | Technical Implementation & Silicon Evidence |
-| :--- | :---: | :--- |
-| **Chained Bootloader** | **WORKS** | `mtkloader` runs from LK inside `boot_a`, preserving genuine Xiaomi AVB footers and VBMeta. Default boot to Android has 0s delay. |
-| **Hardware Dual-Boot** | **WORKS** | Hold **Volume Down** or **Volume Up** at power-on to boot iOS/Darwin. Power on normally without buttons to boot Android. |
-| **Display & Console** | **WORKS** | LK linear framebuffer console lit at `0xfe0c0000` (pitch 4320). Apple boot logo and text console rendered on 1080×2400 panel (1304 cells lit, 774 decoded glyphs). |
-| **CPU & SMP** | **WORKS** | Multi-core SMP brings up all 8 cores via PSCI SMC (`GenericARMPE: 8 of 8 processors are running`). |
-| **Interrupts (GICv3)** | **WORKS** | GICv3 Distributor and Redistributors initialized; `ICC_CTLR_EL1.EOImode` cleared across all 8 cores. |
-| **Storage (UFS 2.2)** | **WORKS** | UniPro linkup (`HCS=0xf`), `fDeviceInit` cleared in 5ms, SCSI `INQUIRY` reads Samsung MCP, Unit Attention cleared via `TEST UNIT READY`. Multi-block GPT parsed, all 74 partitions mapped to XNU via `struct loader_block` (`ufs_shared_pa=0x60004000`). |
-| **Touchscreen** | **WORKS** | FocalTech FT3519T probed over I2C bus `0x11ed0000` (slave address `0x38`). Low-level I2C transactions verified on silicon (`FW_VER=0x70`). |
-| **Buttons** | **WORKS** | MTK Keypad (`0x1c00e000`) Volume Down (`KP_MEM1` bit 0) and Volume Up operational. |
-| **One-Shot USB Runner** | **WORKS** | `tools/boot-xnu.sh` arms trigger in `misc` partition (LBA 8), boots Darwin, and safely auto-resets back to Android via PMIC watchdog, pulling ramoops logs. |
-| **GPU Acceleration** | *In Progress* | Imagination PowerVR BXM-8-256 Rogue RGX (firmware `rgx.fw`). Display currently runs on high-performance CPU framebuffer. |
-| **Wi-Fi & Bluetooth** | *In Progress* | MT6855 CONNSYS at `0x18002000`. Firmware extracted to `fw-connsys/` via `pull-firmware.sh`. |
-| **Sensors & Audio** | *Missing* | SCP sensor hub at `0x1c700000` and audio codec to be mapped in future milestones. |
+| Subsystem | Specification & Memory/Register Address | Verification Status |
+| :--- | :--- | :---: |
+| **CPU Architecture** | 8 Cores: Cores 0-1 (Cortex-A78) + Cores 2-7 (Cortex-A55), ARMv8.2-A | **Verified** |
+| **DRAM** | 8 GB LPDDR4X, Physical Base `0x40000000` | **Verified** |
+| **Interrupt Controller** | ARM GICv3 (`arm,gic-v3`), GICD @ `0x0c000000`, GICR @ `0x0c040000` | **Verified** |
+| **Storage** | 256 GB UFS 2.2 (Samsung `KM8F9001JM-B813`, Controller: `0x112b0000`) | **Verified** |
+| **Display Panel** | 6.67" AMOLED, 1080×2400 (FHD+), 32bpp, LK Framebuffer @ `0xfe0c0000` | **Verified** |
+| **Touchscreen** | FocalTech FT3519T on I2C-0 (`0x11ed0000`, 7-bit addr `0x38`) | **Verified** |
+| **Hardware Keypad** | MTK Keypad (`0x1c00e000`), Vol Down (`KP_MEM1` bit 0), Vol Up | **Verified** |
+| **Watchdog Timer** | MediaTek `TOPRGU` (`0x10007000`), Mode `0x43u` (Warm Reset / DRAM preserved) | **Verified** |
 
 ---
 
-## Repository Structure
+## 3. System Architecture & Multi-Stage Boot Sequence
 
-* `mtkloader/` — Bare-metal chained bootloader source code (`mtkloader.c`, `start.S`, `link.ld`, `build.sh`) containing GICv3, SMP, Framebuffer, UFS, GPT, and I2C touch drivers.
-* `configs/` — Kernel defconfig fragments (`beryl_defconfig` and `beryl.config`).
-* `device.conf` — Authoritative device capabilities record (`works` / `partial` / `missing`).
-* `docs/` — Comprehensive hardware documentation:
-  * `docs/beryl-facts.md`: Board constants, register maps, and partition tables extracted from the device tree.
-  * `docs/beryl-plan.md`: Step-by-step bring-up plan and silicon verification log.
-* `tools/` — Automated flashing and testing utilities:
-  * `tools/boot-xnu.sh`: One-shot USB test runner.
-  * `tools/flash-boot-a.sh`: Safe chunked flasher strictly targeting `boot_a`.
-  * `tools/restore-stock-boot.sh`: Restores genuine stock Android boot image.
-* `pull-firmware.sh` — Extracts touch, connsys, and GPU vendor firmware from the device into `fw-*/` (git-ignored).
-* `logs/` — Verified silicon run logs preserved across warm resets (`last_run_pmsg.txt`, `last_run_console.txt`).
-
----
-
-## How to Boot
-
-### 1. Hardware Dual-Boot (On Phone)
-* **To Boot Android**: Turn on or restart the phone without pressing any buttons. Android loads immediately.
-* **To Boot iOS / Darwin**: Turn on or restart the phone and hold **Volume Down** (or **Volume Up**). `mtkloader` will detect the button press, light up the Apple logo & text console, and boot XNU with all 8 cores running continuously.
-
-### 2. Automated USB Test Cycle (From PC)
-To run an automated test cycle with auto-reset and log extraction over USB:
-```bash
-./tools/boot-xnu.sh
+```
++-----------------------------------------------------------------------------------+
+| Stage 0: MediaTek LK (Little Kernel)                                              |
+| - Verifies AVB header & boots /dev/block/by-name/boot_a                           |
++-----------------------------------------------------------------------------------+
+                                        |
+                                        v
++-----------------------------------------------------------------------------------+
+| Stage 0.5: Chained mtkloader (mtkloader/mtkloader.c)                              |
+| - Prepares GICv3, CPU cores, UFS SCSI controller & Linear Framebuffer Console     |
+| - Maps UFS LBA 61689024 (2477 MB APFS Container) as partition "darwin"            |
+| - Loads XNU kernel_patched + payload.bin (containing root.apfs)                   |
+| - Jumps to XNU kernel entry point                                                 |
++-----------------------------------------------------------------------------------+
+                                        |
+                                        v
++-----------------------------------------------------------------------------------+
+| Stage 1: Darwin XNU Kernel Boot & Ramdisk Mounting                               |
+| - Mounts payload.bin ramdisk as initial root (/dev/md0)                           |
+| - Starts Process 1 (/sbin/launchd on root.apfs)                                   |
+| - CRITICAL: /sbin/launchd on root.apfs MUST BE 100% STATIC (LC_UNIXTHREAD, no dyld)|
++-----------------------------------------------------------------------------------+
+                                        |
+                                        v
++-----------------------------------------------------------------------------------+
+| Stage 2: HakiOS Static Init (hakios/prebuilt/userland/init)                       |
+| - Configures kern.maxvnodes = 32768, inject sysctls                               |
+| - Mounts APFS container on /flash (/dev/ufs_darwin)                               |
+| - Binds /LaunchDaemons, /xpc, /hal over /flash                                    |
+| - Switches root to /flash via kern.redwood_switch_root                            |
+| - Grafts OS Cryptex (/System/Cryptexes/OS with dyld_shared_cache_arm64)           |
+| - Mounts ramfs on /private/var and unpacks var.skel                               |
+| - Runs /etc/rc -> exec /sbin/launchd (substitutes to genuine Apple launchd)       |
++-----------------------------------------------------------------------------------+
+                                        |
+                                        v
++-----------------------------------------------------------------------------------+
+| Stage 3: Genuine Apple iOS 16.5 Userland Handover                                 |
+| - Apple dynamic /sbin/launchd starts under switched root                          |
+| - Dyld finds dyld_shared_cache_arm64 in /System/Cryptexes/OS                      |
+| - Starts system daemons: notifyd, syslogd, logd, containermanagerd                |
+| - Launches com.apple.backboardd -> com.apple.SpringBoard (Graphical UI)           |
++-----------------------------------------------------------------------------------+
 ```
 
 ---
 
-## Building from Source
+## 4. Key Learnings & Error Solutions Index
 
-### Prerequisites
-* Clang / LLVM (`clang`, `ld.lld`, `llvm-objcopy`)
-* Python 3
-* Android SDK Platform Tools (`adb`, `fastboot`)
-* Device with unlocked bootloader and root access
+Below are the 12 critical errors resolved through systematic silicon log analysis:
 
-### Build and Flash
+### 1. Stage-1 PID 1 Binary Dynamic Linkage (`LC_LOAD_DYLINKER`)
+- **Cause**: Linux LLVM `ld64.lld` does not implement `-static`. Compiling `src/init.c` locally created a dynamically linked Mach-O requiring `/usr/lib/dyld`.
+- **Symptom**: `dyld: Library not loaded: /usr/lib/libSystem.B.dylib (no such file, no dyld cache)` $\to$ `panic: initproc failed to start`.
+- **Fix**: Enforce `PREBUILT=1` in `hakios/userland/build.sh`. Unconditionally use verified static `hakios/prebuilt/userland/init` (`flags: <NOUNDEFS>`, `LC_UNIXTHREAD`, no dyld) for `root/sbin/init` and `root/sbin/launchd`.
+
+### 2. Accidental Dyld Embedding on Ramdisk
+- **Cause**: `build.sh` previously copied `$IOS/rootfs/usr/lib/dyld` into `root/usr/lib/dyld`.
+- **Symptom**: Prompted premature dyld invocation on `root.apfs` before dyld shared cache was available.
+- **Fix**: Removed `root/usr/lib/dyld` from `root.apfs`. Dyld lives exclusively in the switched iOS rootfs.
+
+### 3. Diagnostic Test Fault in Prebuilt Init (`test_memory` 64 MB Touch)
+- **Cause**: `hakios/prebuilt/userland/init` contained automated diagnostics at offset `0x21bc` (including 64 MB anonymous memory touching at `0x3300`), which triggered ARM64 page faults on MTK translation tables: `usertrap: launchd[1] exception 1 code 0x5 ... 64 MB of anonymous memory`.
+- **Fix**: Patched instruction at file offset `0x21bc` (`0x70029ce0`) in `hakios/prebuilt/userland/init` to `b 0x3ea4` (`0x1400073a`), bypassing diagnostic tests directly into `configure_inject` $\to$ `configure_vnodes` $\to$ `run_rc` $\to$ genuine iOS launchd.
+
+### 4. MediaTek `TOPRGU` Watchdog Reset Mode
+- **Cause**: Bit 2 (`EXRST_EN` = 0x4) in `TOPRGU_MODE` asserted the external PMIC reset line, cold power-cycling DRAM and losing ramoops logs.
+- **Fix**: Configured `TOPRGU_MODE` to `0x43u` (`WDT_MODE_EN | EXT_POL | DUAL_EN`), preserving DRAM across reboots for automated pstore log rescue.
+
+### 5. Automated Pstore Log Rescue Race Condition
+- **Cause**: `adb wait-for-device` returned prematurely before the device disconnected from USB during reboot.
+- **Fix**: Added an active polling loop on `adb get-state` in `tools/boot-and-listen.py` to verify device disconnect before listening for the warm reset.
+
+### 6. Video Framebuffer Decoding on Watchdog Rescue
+- **Cause**: On-screen frame buffer / panic output was only decoded on `xnu_return_stub`, omitting display dumps on watchdog resets.
+- **Fix**: Integrated `read_screen()` into the automated log rescue pipeline.
+
+### 7. XNU `kern_sig.c:2341 Assertion failed: signal_reason == NULL`
+- **Cause**: A NOP patch at `0x7dd3c0` in `_psignal_internal` caused execution to fall through into uninitialized assertion checks.
+- **Fix**: Patched `0x7dd3c0` with `b +0x34` (`0x1400000d` to `0x7dd3f4`), nopping `0x7dd3d8` and `0x7dd3f0`.
+
+### 8. Infinite Spin Loop on PID 1 Exit
+- **Cause**: Panic call at `0x7c3d94` was patched to `b .`, freezing the CPU without writing stackshots to pstore ramoops.
+- **Fix**: Restored `bl _panic_with_options` (`0x940c04b2`) to dump registers and backtraces to pstore.
+
+### 9. Synthetic Directory `EEXIST` Handling
+- **Cause**: `synthetic_dir()` treated `EEXIST` as failure if the mount point directory already existed on flash.
+- **Fix**: Checked `stat` and treated `EEXIST` as success.
+
+### 10. Bind-Mount Failure Over Symlinks
+- **Cause**: `mount("bindfs", ...)` failed when target directories were symlinks.
+- **Fix**: Implemented `bind_or_symlink()` to verify `S_ISLNK` before invoking `bindfs`.
+
+### 11. Launchd Path Substitution in `run_rc`
+- **Cause**: `root/etc/rc` ran `exec /sbin/launchd.ios`, which could fail if `/sbin/launchd.ios` was absent on switched root.
+- **Fix**: Verified and ensured `run_command` in `init` automatically substitutes `/sbin/launchd.ios` with genuine `/sbin/launchd` on flash root.
+
+### 12. Redundant 10-Minute `system.apfs` Rebuilds
+- **Cause**: Timestamp checks against `obj/stage0` triggered full 2.5 GB APFS container recompression on every run.
+- **Fix**: Configured `build.sh` to reuse existing `system.apfs` unless `SYSTEM=1` is explicitly set.
+
+---
+
+## 5. Latest Silicon Run Findings (`run_20261116_182305`)
+
+From the rescued silicon pstore log (`logs/run_20261116_182305/console.txt`):
+1. **Static Init Success**: `hakios/prebuilt/userland/init` loaded cleanly as PID 1, configured max vnodes to 32768, parsed `/etc/rc`, and executed `$ exec /sbin/launchd.ios`.
+2. **Current Kernel Trap Point**:
+   ```text
+   init: up to 32768 vnodes
+   === /etc/rc ===
+   $ exec /sbin/launchd.ios
+   panic(cpu 2 caller 0xfffffff007ad39b4): Kernel data abort. at pc 0xfffffff007357edc, lr 0xfffffff0077e091c (saved state: 0xfffffff883b47650)
+     x0: 0x0  x1: 0xfffffff362ba4320  x2: 0x1  x3: 0xfffffff6156a0161
+     pc: 0xfffffff007357edc  lr: 0xfffffff0077e091c  far: 0x420
+   ```
+3. **Disassembly Analysis**:
+   - `0x7357ecc`: Function begins with:
+     ```arm64
+     0x7357ecc: stp x20, x19, [sp, #-32]!
+     0x7357ed0: stp x29, x30, [sp, #16]
+     0x7357ed4: add x29, sp, #16
+     0x7357ed8: mov x20, x0
+     0x7357edc: ldr x19, [x0, #0x420]   <-- DATA ABORT (x0 == NULL, far == 0x420)
+     ```
+   - Caller is at `0x77e0918` in `execve` path (`bsd/kern/kern_exec.c` / image params processing).
+   - **Resolution Target**: Guard against NULL `x0` at `0x7357edc` (`cbz x0, ...` or return 0).
+
+---
+
+## 6. How to Build, Flash, and Resume
+
+### Invariants:
+- **Always Flash strictly to `boot_a`**: `dd if=... of=/dev/block/by-name/boot_a bs=4096 conv=fsync`.
+- **Never touch `boot_b`** (preserves failsafe Android backup).
+- **Push all commits to `master`**: `https://github.com/aditya-dumps/hakios-beryl.git`.
+
+### Build & Flash Commands:
 ```bash
-# Build mtkloader and chain with Android kernel
+# 1. Build root.apfs with static init
+cd hakios/userland && ./build.sh && cd ../..
+
+# 2. Package payload.bin
+python3 hakios/xnuloader/mkpayload.py -o mtkloader/payload.bin kernel=mtkloader/kernel_patched ramdisk=hakios/userland/root.apfs
+
+# 3. Build chained mtkloader boot image
 cd mtkloader && ./build.sh && cd ..
 
-# Flash to boot_a only (never touches boot_b or other partitions)
+# 4. Flash strictly to boot_a
 ./tools/flash-boot-a.sh mtkloader/mtkloader_xnu.img
+
+# 5. Trigger boot and listen for logs
+python3 tools/boot-and-listen.py boot-xnu
 ```
-
----
-
-## Silicon Verification Evidence
-
-Excerpts from the live silicon ramoops log ([logs/last_run_pmsg.txt](logs/last_run_pmsg.txt)):
-
-```text
-== mtkloader MT6855 ==
-UFS: post-linkup: HCS=0xf res=0x0
-UFS: Device Present! Initializing SCSI subsystem...
-UFS: fDeviceInit cleared (device ready) in 5 ms
-UFS: Storage Device: [SAMSUNG.KM8F9001JM-B813.0700]
-UFS: >>> GPT VERIFIED! <<< total_parts=74 part_lba=2
-UFS: Partitions on Flash:
-  [misc] LBA 8..135 (0 MB)
-  ...
-  [boot_a] LBA 181504..214271 (128 MB)
-  [super] LBA 460800..2689023 (8704 MB)
-  [userdata] LBA 2689024..62476279 (233543 MB)
-Touch I2C @ 0x11ed0000: CTRL 0x0 TIMING 0x20 FIFO_STAT 0x8000 IO_CFG 0x3
-Touch FT3519T: FW_VER=0x0x70
-
-[+] Booting Darwin / XNU...
-XNU kernel 15607928 bytes, ramdisk 52224 bytes
-gic_v3_irq_cpu_init: cleared EOImode on all cores
-boot-args: debug=0x8 serial=3 rd=md0 -v cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000
-
-=== SCREEN CAPTURE (decoded via iso_font) ===
-[screen: 1304 cells lit, 774 read as characters, last text row 150]
-=== END OF SCREEN CAPTURE ===
-=== XNU log (from DRAM) ===
-GenericARMPE: 8 of 8 processors are running
-Darwin Kernel Version 22.5.0: xnu-8796.121.2
-```
-
----
-
-## License
-
-* `mtkloader/` and tooling: MIT License
-* `kernel/` and XNU components: Apple Public Source License (APSL 2.0)
-* No proprietary Apple binaries, vendor firmware, or user data are stored in this repository.
