@@ -80,6 +80,23 @@ if inst_pm4 == 0x941a1da7:
 else:
     print("[*] 0x43d96c already patched")
 
+# Check offsets for kern_sig.c:2341 assertion (signal_reason == NULL panic):
+# 0x7dcec0: cbnz x21, #0x7dd3c4 -> nop
+inst_sig1 = struct.unpack_from("<I", kdata, 0x7dcec0)[0]
+if inst_sig1 == 0xb5002835:
+    struct.pack_into("<I", kdata, 0x7dcec0, 0xd503201f)
+    print("[+] Patched 0x7dcec0 (kern_sig signal_reason == NULL assertion cbnz -> nop)")
+else:
+    print(f"[*] 0x7dcec0 check: {hex(inst_sig1)}")
+
+# 0x7dd14c: cbnz x21, #0x7dd3dc -> nop
+inst_sig2 = struct.unpack_from("<I", kdata, 0x7dd14c)[0]
+if inst_sig2 == 0xb5001495:
+    struct.pack_into("<I", kdata, 0x7dd14c, 0xd503201f)
+    print("[+] Patched 0x7dd14c (kern_sig signal_reason == NULL assertion cbnz -> nop)")
+else:
+    print(f"[*] 0x7dd14c check: {hex(inst_sig2)}")
+
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
 print(f"[+] Saved patched kernel to {KERNEL_PATH}")
