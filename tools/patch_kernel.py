@@ -163,6 +163,32 @@ if inst_ut == 0x34000108:
 else:
     print(f"[*] 0x47234c check: {hex(inst_ut)}")
 
+# Check offset 0x353ecc (execve proc helper NULL deref trampoline)
+# Trampoline at 0x44d260 in __TEXT_EXEC:
+#   cbz x0, +12 (0x745126c) -> 0x34000060 (or 0xb4000060)
+#   stp x20, x19, [sp, #-32]! -> 0xa9be4ff4
+#   b 0x7357ed0 -> 0x17fc1b1a
+#   ret -> 0xd65f03c0
+inst_trampoline = struct.unpack_from("<I", kdata, 0x44d260)[0]
+if inst_trampoline != 0x34000060 and inst_trampoline != 0xb4000060:
+    struct.pack_into("<IIII", kdata, 0x44d260, 0xb4000060, 0xa9be4ff4, 0x17fc1b1a, 0xd65f03c0)
+    struct.pack_into("<I", kdata, 0x353ecc, 0x1403e4e5) # b 0x7451260
+    print("[+] Patched 0x353ecc (execve helper NULL deref -> __TEXT_EXEC trampoline at 0x44d260)")
+else:
+    print("[*] 0x44d260 trampoline already patched")
+
+# Check offset 0x353b44 (get_bsdthread_info NULL deref safeguard)
+# 0x7357b44:
+#   cbz x0, #0x7357b4c (0xb4000040)
+#   add x0, x0, #0x580 (0x91160000)
+#   ret                (0xd65f03c0)
+inst_th = struct.unpack_from("<I", kdata, 0x353b44)[0]
+if inst_th != 0xb4000040:
+    struct.pack_into("<III", kdata, 0x353b44, 0xb4000040, 0x91160000, 0xd65f03c0)
+    print("[+] Patched 0x353b44 (get_bsdthread_info -> return NULL if th == NULL)")
+else:
+    print("[*] 0x353b44 already patched")
+
 # Ensure PID 1 exit outputs full panic report to pmsg instead of infinite hang:
 # 0x7c3d94 (bl _panic_with_options: 0x940c04b2)
 struct.pack_into("<I", kdata, 0x7c3d94, 0x940c04b2)
