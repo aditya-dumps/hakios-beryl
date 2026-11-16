@@ -1437,6 +1437,8 @@ static void rescue_log(void)
 	/* 1. Keep fbc disabled during log rescue so output goes directly to ramoops */
 	uint64_t fb_save = fbc.base;
 	fbc.base = 0;
+	dbg_puts("\n=== SCREEN CAPTURE (decoded via iso_font) ===\n");
+	read_screen();
 
 	if (s.log && s.log_len && s.log_ring_at && s.log_wrapped) {
 		const uint64_t head_sz = 256 * 1024, ring_sz = 1024 * 1024;
@@ -2557,13 +2559,14 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out("\n");
 
 	if (!interactive) {
-		uint32_t t = 45; /* 45 seconds hardware warm reset timeout for fast test turnaround */
+		uint32_t t = 180; /* 180 seconds hardware warm reset timeout */
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
 		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-		/* 0x47 = WDT_MODE_EN (1) | EXT_POL (2) | EXRST_EN (4) | DUAL_EN (0x40).
+		/* 0x43 = WDT_MODE_EN (1) | EXT_POL (2) | DUAL_EN (0x40).
+		 * Explicitly NO bit 2 (EXRST_EN) to avoid cold PMIC reset and preserve DRAM across reboots!
 		 * Explicitly NO bit 3 (IRQ_EN) so expiry triggers immediate hardware reset! */
-		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x47u);
+		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u);
 		out("watchdog armed: ");
 		out_dec(t);
 		out(" s (hardware warm reset)\n");
