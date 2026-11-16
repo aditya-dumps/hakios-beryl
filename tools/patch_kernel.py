@@ -98,37 +98,21 @@ else:
     print(f"[*] 0x7dd14c check: {hex(inst_sig2)}")
 
 # Zone Allocator Use-After-Free / Element Modified After Free Panic Bypasses:
-# 0x346954: cbnz x0, 0xfffffff00734ac04 -> nop
-inst_z1 = struct.unpack_from("<I", kdata, 0x346954)[0]
-if inst_z1 == 0xb5001580:
-    struct.pack_into("<I", kdata, 0x346954, 0xd503201f)
-    print("[+] Patched 0x346954 (zalloc element modified after free cbnz -> nop)")
+# 0x346270 (_zalloc_ext): tbnz w20, #0xe, +0x18 -> b +0x18 (0xfffffff00734a288)
+inst_ze = struct.unpack_from("<I", kdata, 0x346270)[0]
+if inst_ze == 0x377000d4:
+    struct.pack_into("<I", kdata, 0x346270, 0x14000006)
+    print("[+] Patched 0x346270 (_zalloc_ext bypass poison check -> b +0x18)")
 else:
-    print(f"[*] 0x346954 check: {hex(inst_z1)}")
+    print(f"[*] 0x346270 check: {hex(inst_ze)}")
 
-# 0x346280: cbnz x0, 0xfffffff00734a554 -> nop
-inst_z2 = struct.unpack_from("<I", kdata, 0x346280)[0]
-if inst_z2 == 0xb50016a0:
-    struct.pack_into("<I", kdata, 0x346280, 0xd503201f)
-    print("[+] Patched 0x346280 (zalloc element modified after free cbnz -> nop)")
+# 0x346944 (_zalloc_item): tbnz w24, #0xe, +0x18 -> b +0x18 (0xfffffff00734a95c)
+inst_zi = struct.unpack_from("<I", kdata, 0x346944)[0]
+if inst_zi == 0x377000d8:
+    struct.pack_into("<I", kdata, 0x346944, 0x14000006)
+    print("[+] Patched 0x346944 (_zalloc_item bypass poison check -> b +0x18)")
 else:
-    print(f"[*] 0x346280 check: {hex(inst_z2)}")
-
-# 0x3462f4: cbz x0, 0xfffffff00734a2dc -> b 0xfffffff00734a2dc
-inst_z3 = struct.unpack_from("<I", kdata, 0x3462f4)[0]
-if inst_z3 == 0xb4ffff40:
-    struct.pack_into("<I", kdata, 0x3462f4, 0x14fffff6)
-    print("[+] Patched 0x3462f4 (zalloc element modified after free loop cbz -> b)")
-else:
-    print(f"[*] 0x3462f4 check: {hex(inst_z3)}")
-
-# 0x3469cc: cbz x0, 0xfffffff00734a9b4 -> b 0xfffffff00734a9b4
-inst_z4 = struct.unpack_from("<I", kdata, 0x3469cc)[0]
-if inst_z4 == 0xb4ffff40:
-    struct.pack_into("<I", kdata, 0x3469cc, 0x14fffff4)
-    print("[+] Patched 0x3469cc (zalloc element modified after free loop cbz -> b)")
-else:
-    print(f"[*] 0x3469cc check: {hex(inst_z4)}")
+    print(f"[*] 0x346944 check: {hex(inst_zi)}")
 
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
