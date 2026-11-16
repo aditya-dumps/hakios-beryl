@@ -217,6 +217,10 @@ print("[+] Patched 0x45a028 (b _fleh_synchronous directly for EL1 synchronous ex
 struct.pack_into("<I", kdata, 0x7c3d94, 0x940c04b2)
 print("[+] Restored 0x7c3d94 (bl _panic_with_options for full diagnostic panic dump)")
 
+# Patch offset 0xaf5740: hc_spin_us default value (from 40us to 5,000,000us = 5s) to eliminate UFS slot timeouts
+struct.pack_into("<I", kdata, 0xaf5740, 5000000)
+print("[+] Patched 0xaf5740 (hc_spin_us = 5,000,000 us to eliminate UFS timeouts and SIGBUS)")
+
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
 print(f"[+] Saved patched kernel to {KERNEL_PATH}")

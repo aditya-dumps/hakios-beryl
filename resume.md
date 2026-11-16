@@ -97,3 +97,4 @@
 | 16 | `kern_sig.c:1838 Assertion failed` | `uth == NULL` during early signal routing | Patched `0x7dc92c` & `0x7dc9bc` to route directly to clean return |
 | 17 | `LaunchDaemons error 122` | Host Linux umask 0002 gave plists group-write permissions | Masked out `0o022` in `mkapfs.py` and `build.sh` |
 | 18 | `Invalid kernel stack pointer` | `locore.S` checked `cmp sp, stack_top` with `b.ge` during initial copyin | Patched `0x45a028` to route directly to `_fleh_synchronous`; NOPed `msr spsel, #0` |
+| 19 | `UFS slot 1 timeout -> SIGBUS` | `hc_spin_us` was 40 us; fell into msleep and poller stalled despite `doorbell == 0` | Patched `hc_spin_us` to 5,000,000 us at `0xaf5740` & added `ufs_native_spin=5000000` |
