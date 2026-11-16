@@ -97,6 +97,39 @@ if inst_sig2 == 0xb5001495:
 else:
     print(f"[*] 0x7dd14c check: {hex(inst_sig2)}")
 
+# Zone Allocator Use-After-Free / Element Modified After Free Panic Bypasses:
+# 0x346954: cbnz x0, 0xfffffff00734ac04 -> nop
+inst_z1 = struct.unpack_from("<I", kdata, 0x346954)[0]
+if inst_z1 == 0xb5001580:
+    struct.pack_into("<I", kdata, 0x346954, 0xd503201f)
+    print("[+] Patched 0x346954 (zalloc element modified after free cbnz -> nop)")
+else:
+    print(f"[*] 0x346954 check: {hex(inst_z1)}")
+
+# 0x346280: cbnz x0, 0xfffffff00734a554 -> nop
+inst_z2 = struct.unpack_from("<I", kdata, 0x346280)[0]
+if inst_z2 == 0xb50016a0:
+    struct.pack_into("<I", kdata, 0x346280, 0xd503201f)
+    print("[+] Patched 0x346280 (zalloc element modified after free cbnz -> nop)")
+else:
+    print(f"[*] 0x346280 check: {hex(inst_z2)}")
+
+# 0x3462f4: cbz x0, 0xfffffff00734a2dc -> b 0xfffffff00734a2dc
+inst_z3 = struct.unpack_from("<I", kdata, 0x3462f4)[0]
+if inst_z3 == 0xb4ffff40:
+    struct.pack_into("<I", kdata, 0x3462f4, 0x14fffff6)
+    print("[+] Patched 0x3462f4 (zalloc element modified after free loop cbz -> b)")
+else:
+    print(f"[*] 0x3462f4 check: {hex(inst_z3)}")
+
+# 0x3469cc: cbz x0, 0xfffffff00734a9b4 -> b 0xfffffff00734a9b4
+inst_z4 = struct.unpack_from("<I", kdata, 0x3469cc)[0]
+if inst_z4 == 0xb4ffff40:
+    struct.pack_into("<I", kdata, 0x3469cc, 0x14fffff4)
+    print("[+] Patched 0x3469cc (zalloc element modified after free loop cbz -> b)")
+else:
+    print(f"[*] 0x3469cc check: {hex(inst_z4)}")
+
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
 print(f"[+] Saved patched kernel to {KERNEL_PATH}")
