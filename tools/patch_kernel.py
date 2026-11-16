@@ -40,12 +40,18 @@ else:
     print("[*] 0x79f3bc already patched (_cs_invalid_page)")
 
 # Check offset 0x7dd3c0 (_psignal_internal panic on unexpected SIGKILL of init)
+# Replace with b +0x34 (0x1400000d) to jump over line 2341/2455 assertion panics to normal path at 0x7dd3f4
 inst4 = struct.unpack_from("<I", kdata, 0x7dd3c0)[0]
-if inst4 == 0x940b9f12:
-    struct.pack_into("<I", kdata, 0x7dd3c0, 0xd503201f)
-    print("[+] Patched 0x7dd3c0 (_psignal_internal unexpected SIGKILL panic -> nop)")
+if inst4 != 0x1400000d:
+    struct.pack_into("<I", kdata, 0x7dd3c0, 0x1400000d)
+    print("[+] Patched 0x7dd3c0 (_psignal_internal unexpected SIGKILL panic -> b +0x34 to 0x7dd3f4)")
 else:
-    print("[*] 0x7dd3c0 already patched (nop)")
+    print("[*] 0x7dd3c0 already patched (b +0x34)")
+
+# Nop assertion panics in kern_sig.c (0x7dd3d8 and 0x7dd3f0: signal_reason == NULL)
+struct.pack_into("<I", kdata, 0x7dd3d8, 0xd503201f)
+struct.pack_into("<I", kdata, 0x7dd3f0, 0xd503201f)
+print("[+] Patched 0x7dd3d8 & 0x7dd3f0 (kern_sig.c assertion panics -> nop)")
 
 # Check offsets for pmap_enter over-unwire / over-release panic assertions:
 # 0x43d65c: b.le #0xfffffff007441948 (over-release assertion) -> nop
