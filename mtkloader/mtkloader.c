@@ -2557,7 +2557,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out("\n");
 
 	if (!interactive) {
-		uint32_t t = 300; /* 300 seconds (5 min) hardware warm reset timeout */
+		uint32_t t = 180; /* 180 seconds (3 min) hardware warm reset timeout */
 		marker_set(MARK_RUNNING);
 		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
 		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
@@ -2580,7 +2580,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		out("\n[+] Jumping to iOS / Darwin (Interactive Session)...\n");
 		out("[i] Screen will stay on. Hold Power for 8s to reboot to Android.\n");
 	} else {
-		out("\n[+] Jumping to XNU Darwin (5s test)...\n[!] Returning to Android automatically in ~8s...\n");
+		out("\n[+] Jumping to XNU Darwin (Automated Run)...\n[!] Returning to Android automatically in ~180s...\n");
 	}
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
@@ -2694,10 +2694,10 @@ void mtkloader_main(uint64_t dtb)
 		interactive = 1;
 	} else if (s_usb_xnu_trigger == 1) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
-		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / iOS (Interactive)...\n");
+		out("\n[+] USB TRIGGER FOUND in misc! Booting Darwin / iOS (Automated with Watchdog)...\n");
 		fbc.fg = 0xffffffffu;
 		xnu = 1;
-		interactive = 1;
+		interactive = 0;
 	} else if (pmsg_trig) {
 		fbc.fg = 0xff00ff00u; /* GREEN */
 		out("\n[+] PMSG TRIGGER FOUND! Booting Darwin / iOS (Interactive)...\n");
