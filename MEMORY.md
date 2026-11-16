@@ -21,23 +21,36 @@
 | **CPUs (8 cores)** | Boot `{ 0x000, 0x600, 0x700, 0x100..0x500 }` | Cluster 0: 6x A55 (2.0 GHz), Cluster 1: 2x A78 (2.2 GHz). Method: PSCI 1.0. |
 
 ## 3. MediaTek Watchdog (TOPRGU) Invariants
-* **Hardware Register Formula**: `wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);` where `t` is direct whole seconds (from Linux `drivers/watchdog/mtk_wdt.c` `WDT_LENGTH_TIMEOUT(t) | WDT_LENGTH_KEY`). Setting `(15 << 5) | 0x8` = exactly 15.000 seconds.
+* **Hardware Register Formula**: `wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);` where `t` is direct whole seconds (from Linux `drivers/watchdog/mtk_wdt.c` `WDT_LENGTH_TIMEOUT(t) | WDT_LENGTH_KEY`). Setting `(180 << 5) | 0x8` = exactly 180 seconds.
 * **Keys**: Mode key `0x22000000`, Reload key `0x1971` (`TOPRGU_RESTART`), SWRST key `0x1209`.
-* **Hardware Warm Reset Mode**: `wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x47u);` (`0x47 = WDT_MODE_EN | EXT_POL | EXRST_EN | DUAL_EN`).
-  * Bit 2 (`EXRST_EN`) is mandatory to assert external reset to PMIC.
-  * DRAM retains power across TOPRGU warm reset, preserving `/sys/fs/pstore/console-ramoops-0`.
+* **Hardware Warm Reset Mode**: `wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u);` (`0x43 = WDT_MODE_EN | EXT_POL | DUAL_EN`).
+  * Bit 2 (`EXRST_EN`) MUST BE CLEARED: if bit 2 is set (0x47), PMIC performs a cold external reset that zeros DRAM. With 0x43, TOPRGU resets the SoC while DRAM maintains self-refresh power, preserving `/sys/fs/pstore/console-ramoops-0`.
   * Cold power-cut (holding Power button 8s) zeros DRAM. Always rely on TOPRGU warm reset.
 
 ## 4. Userland & Graphical Boot Pipeline
-1. `mtkloader` draws Apple logo to `LK_FB_BASE` (`0xfe0c0000`), flushes cache, and jumps to XNU.
+1. `mtkloader` draws Apple logo to `LK_FB_BASE` (`0xfe0c0000`), maps APFS container LBA `61,689,024` as partition `darwin` (`/dev/ufs_darwin`), flushes cache, and jumps to XNU.
 2. Kernel initializes memory, mounts ramdisk root (`rd=md0`), and starts `init` (PID 1).
+   - Invariant: `/sbin/launchd` on `root.apfs` MUST be 100% static (`LC_UNIXTHREAD`, no dyld).
+   - `hakios/prebuilt/userland/init` has offset `0x21bc` patched to `b 0x3ea4` (`0x1400073a`) to bypass diagnostic faults directly into `run_rc`.
 3. `init` executes `flash_root("ufs_darwin")`:
    - Mounts `/dev/ufs_darwin` on `/flash`.
    - Binds `/LaunchDaemons` to `/flash/System/Library/LaunchDaemons`.
    - Swaps root to `/flash` (`kern.redwood_switch_root`).
    - Grafts OS & App cryptexes for dynamic linker shared cache (`dyld_shared_cache_arm64`).
+   - Mounts ramfs on `/private/var` and unpacks `var.skel`.
 4. Executes `exec /sbin/launchd` on `/flash` root.
 5. `launchd` spawns `com.apple.backboardd` and `com.apple.SpringBoard` with AMOLED display rasterization.
+
+## 5. Current Silicon Status & Immediate Next Step
+* **Status**: Verified in `logs/run_20261116_182305/console.txt`:
+  - Static `init` ran successfully as PID 1!
+  - `init: up to 32768 vnodes`
+  - `=== /etc/rc ===`
+  - `$ exec /sbin/launchd.ios`
+  - Trapped at kernel `execve` path:
+    `panic: Kernel data abort. at pc 0xfffffff007357edc, lr 0xfffffff0077e091c (far: 0x420)`.
+  - Disassembly at `0x7357edc`: `ldr x19, [x0, #0x420]` where `x0 == NULL`.
+* **Immediate Fix**: Patch `0x7357edc` with a NULL check (`cbz x0, ...`) or guard `0x77e0918` in kernel `kern_exec.c`.
 
 ## 5. Reference Stack & Porting Base
 * **Reference**: `hakios-mt6768/AGENTS.md` and `hakios/mtk/README.md`.
