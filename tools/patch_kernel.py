@@ -372,8 +372,15 @@ print("[+] Restored 0x86e4f4-0x86e4f8 (shared_region_check_np -> original adrp/a
 struct.pack_into("<I", kdata, 0x2c80a0, 0x14000043) # b 0x2c81ac
 print("[+] Patched 0x2c80a0 (clock_initialize_calendar warning bypass -> b 0x2c81ac)")
 
-# 8. Patch lock_ticket.c assertions (Invalid HW ticket lock panic @lock_ticket.c:125):
-# Eliminates DEVELOPMENT XNU assertions on lock->type == 0x44 for dynamically allocated IPC ports across all CPUs
+# 8. Patch lock_ticket.c assertions (Invalid HW ticket lock panic @lock_ticket.c:125, 134, 143, 152):
+# Neutralize all 4 ticket lock panic helper stubs at root:
+# 0xac7840 (line 152: unexpectedly not owned), 0xac7870 (line 143: unexpectedly owned),
+# 0xac78a0 (line 125: invalid type), 0xac78d0 (line 134: invalid owner)
+for panic_stub in [0xac7840, 0xac7870, 0xac78a0, 0xac78d0]:
+    struct.pack_into("<I", kdata, panic_stub, 0xd65f03c0) # ret
+print("[+] Neutralized lock_ticket.c panic entry stubs (0xac7840, 0xac7870, 0xac78a0, 0xac78d0 -> ret)")
+
+# Eliminates DEVELOPMENT XNU assertions on lock->type == 0x44 and lock->owner across all CPUs
 ticket_lock_offsets = [
     0x2e8074, 0x2e81d4, 0x2e81dc, 0x2e833c, 0x2e8344, 0x2e84c8, 0x2e84e4, 0x2e85f0, 0x2e8614, 0x2e8670,
     0x2e8708, 0x2e87a0, 0x2e87b8, 0x2e88fc, 0x2e8918, 0x2e8a24, 0x2e8a48, 0x2e8aa0, 0x2e8b38, 0x2e8cbc,
@@ -383,11 +390,13 @@ ticket_lock_offsets = [
     0x2ea2a8, 0x2ea2cc, 0x2ea2d4, 0x2ea374, 0x2ea398, 0x2ea3a0, 0x2ea440, 0x2ea4e0, 0x2ea570, 0x2ea590,
     0x2ea5ac, 0x2ea65c, 0x2ea670, 0x2ea68c, 0x2ea730, 0x2ea7c4, 0x2eab5c, 0x2eabb8, 0x2eac14, 0x2eac8c,
     0x2ead94, 0x2eb0ac, 0x2eb0e0, 0x2eb174, 0x2eb648, 0x2eb69c, 0x2eb6a4, 0x2eb6a8, 0x2eb6b0, 0x2eb6dc,
-    0x2eba9c, 0x2ebab8, 0x2ebb4c, 0x2ebb68, 0x2ebbf4, 0x2ebc60, 0x2ebce8
+    0x2eba9c, 0x2ebab8, 0x2ebb4c, 0x2ebb68, 0x2ebbf4, 0x2ebc60, 0x2ebce8,
+    # Additional ticket lock release / caller branch sites
+    0x2eeca0, 0x2eecf0, 0x2eecf4, 0x2eed08, 0x2eed10, 0x2eed18, 0x2ead3c, 0x2eadec, 0x2eac74, 0x2eac78, 0x2eacf0
 ]
 for t_off in ticket_lock_offsets:
     struct.pack_into("<I", kdata, t_off, 0xd503201f) # nop
-print(f"[+] Patched {len(ticket_lock_offsets)} lock_ticket.c assertion branches -> nop")
+print(f"[+] Patched {len(ticket_lock_offsets)} lock_ticket.c assertion & panic branches -> nop")
 
 # 9. Patch ipc_tt.c assertions (convert_corpse_to_port_and_nsrequest):
 # Prevents assertion panic "Assertion failed: port->ip_srights == 0" @ ipc_tt.c:3764
@@ -725,6 +734,37 @@ print("[+] Installed Patch 34 at 0x4538c0: phystokv illegal PA panic bypass -> m
 # When compressed PTE has extra bits outside the expected compressed mask, unconditionally bypass the panic to 0xfffffff007442424
 struct.pack_into("<I", kdata, 0x43e3f0, 0x1400000d) # b #0xfffffff007442424 (offset +0x34)
 print("[+] Installed Patch 35 at 0x43e3f0: compressed PTE extra bits panic bypass -> b 0xfffffff007442424")
+
+# Patch 36: sched_clutch.c:1404 priority_queue_empty & range panic bypass at 0x2ff8a0 (VA 0xfffffff0073038a0)
+# When clutch bucket thread runq is empty, return priority 0 cleanly to 0xfffffff0073038b8 instead of panicking
+struct.pack_into("<I", kdata, 0x2ff8a0, 0xb40000c8) # cbz x8, #0xfffffff0073038b8 (offset +0x18)
+# Also bypass line 1471 range panic at 0x2ffa64 (VA 0xfffffff007303a64) -> b.hs 0xfffffff007303a88
+struct.pack_into("<I", kdata, 0x2ffa64, 0x54000122) # b.hs #0xfffffff007303a88 (offset +0x24)
+print("[+] Installed Patch 36 at 0x2ff8a0 & 0x2ffa64: sched_clutch priority_queue_empty & range panic bypass")
+
+# Patch 37: IOKitBSDInit.cpp:1042 / 1039 Assertion failed: pe / matching bypass & pe->release NULL dereference fix
+# 0xa28b28 (VA 0xfffffff007a2cb28): cbz x0, #0xfffffff007a2cba4 (0xb40003e0) - bypass matching == NULL panic
+# 0xa28b54 (VA 0xfffffff007a2cb54): cbz x21, #0xfffffff007a2cb84 (0xb4000195) - bypass pe == NULL panic
+# 0xa28b94 (VA 0xfffffff007a2cb94): cbz x21, #0xfffffff007a2cba4 (0xb4000095) - bypass pe->release() NULL dereference
+# 0xac503c (VA 0xfffffff007ac903c): ret (0xd65f03c0) - neutralize assertion panic stub
+struct.pack_into("<I", kdata, 0xa28b28, 0xb40003e0)
+struct.pack_into("<I", kdata, 0xa28b54, 0xb4000195)
+struct.pack_into("<I", kdata, 0xa28b94, 0xb4000095)
+struct.pack_into("<I", kdata, 0xac503c, 0xd65f03c0)
+print("[+] Installed Patch 37 at 0xa28b28, 0xa28b54, 0xa28b94, 0xac503c: IOKitBSDInit assertion bypass & NULL guard")
+
+# Patch 38: _loader_jump T0SZ range check bypass at 0x471a10 (VA 0xfffffff007475a10)
+# In iOS 16 userland, T0SZ=16 (48-bit address space), causing loader_jump() to abort and ret without calling xnu_return_stub.
+# Unconditionally branch over the T0SZ check straight to 0xfffffff007475a34 (dc cvac cache flush & stub entry).
+struct.pack_into("<I", kdata, 0x471a10, 0x14000009) # b #0xfffffff007475a34
+print("[+] Installed Patch 38 at 0x471a10: _loader_jump T0SZ check bypass -> b 0xfffffff007475a34")
+
+# Patch 39: _loader_jump TCR_EL1 T0SZ configuration at 0x471b90 (VA 0xfffffff007475b90)
+# Replace `bic x4, x4, #0x80` with `movk x4, #0x2519` to set T0SZ=25 (Level 1 table), TG0=4K, SH0=Outer, EPD0=0
+struct.pack_into("<I", kdata, 0x471b90, 0xf284a324) # movk x4, #0x2519
+print("[+] Installed Patch 39 at 0x471b90: _loader_jump TCR_EL1 T0SZ=25 setup -> movk x4, #0x2519")
+
+
 
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)

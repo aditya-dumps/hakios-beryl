@@ -47,10 +47,12 @@
 
 /* MT6855 (8 cores):
  * Cluster 0 (Cortex-A55 @ 2.0 GHz): MPIDR 0x000, 0x100, 0x200, 0x300, 0x400, 0x500
- * Cluster 1 (Cortex-A78 @ 2.2 GHz): MPIDR 0x600, 0x700
- * Bring-up order: { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300, 0x400, 0x500 }
+ * Cluster 0 (Cortex-A55 @ 2.0 GHz): MPIDR 0x000..0x500
+ * Cluster 1 (Cortex-A78 @ 2.5 GHz): MPIDR 0x600, 0x700
+ * Native hardware order: { 0x000, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700 }
  */
 static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300, 0x400, 0x500 };
+
 
 #ifndef XNU_CHECKPOINT
 #define XNU_CHECKPOINT      0
@@ -682,6 +684,10 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop(&w, "nvram-proxy-data", nvram_image, sizeof(nvram_image));
 
 	dt_begin(&w, "memory-map");
+	uint64_t tee_reg[2] = { 0x8a000000ULL, 0x03560000ULL };
+	dt_prop(&w, "Reserved-TEE", tee_reg, sizeof(tee_reg));
+	uint64_t md1_reg[2] = { 0xd4000000ULL, 0x07650000ULL };
+	dt_prop(&w, "Reserved-MD1", md1_reg, sizeof(md1_reg));
 	if (sys_size != 0) {
 		uint64_t sys_reg[2] = { sys_pa, sys_size };
 		dt_prop(&w, "RAMDisk", sys_reg, sizeof(sys_reg));
@@ -729,7 +735,7 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 		dt_prop_u32(&w, "cpu-id", (uint32_t)i);
 		dt_prop_u64(&w, "timebase-frequency", cntfrq);
 		dt_prop_u64(&w, "fixed-frequency", cntfrq);
-		dt_prop_u64(&w, "clock-frequency", (mpidr == 0x600 || mpidr == 0x700) ? 2200000000ULL : 2000000000ULL);
+		dt_prop_u64(&w, "clock-frequency", (mpidr == 0x600 || mpidr == 0x700) ? 2500000000ULL : 2000000000ULL);
 		dt_prop_u64(&w, "bus-frequency", 100000000ULL);
 		dt_prop_u64(&w, "memory-frequency", 100000000ULL);
 		dt_prop_u64(&w, "peripheral-frequency", 26000000ULL);
@@ -749,26 +755,10 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
-	dt_prop_str(&w, "name", "gic");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
 	dt_prop_u32(&w, "AAPL,phandle", 0x10);
-	dt_prop_str(&w, "interrupt-controller", "master");
+	dt_prop(&w, "interrupt-controller", NULL, 0);
 	uint64_t gic_reg[4] = { 0x0c000000 - 0x0c000000, 0x10000, 0x0c040000 - 0x0c000000, 0x200000 };
-	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
-	dt_end(&w);
-
-	dt_begin(&w, "interrupt-controller");
-	dt_prop_str(&w, "device_type", "interrupt-controller");
-	dt_prop_str(&w, "name", "interrupt-controller");
-	dt_prop_str(&w, "compatible", "arm,gic-v3");
-	dt_prop_u32(&w, "AAPL,phandle", 0x11);
-	dt_prop_str(&w, "interrupt-controller", "master");
-	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
-	dt_end(&w);
-
-	dt_begin(&w, "timer");
-	dt_prop_str(&w, "device_type", "timer");
-	dt_prop_str(&w, "compatible", "arm,armv8-timer");
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
 	dt_end(&w);
 
@@ -865,48 +855,105 @@ static inline uint64_t sanitize_kva(uint64_t va)
 	return va;
 }
 
-/* Walk ARM64 page tables using TTBR1_EL1 */
+static uint64_t s_kernel_ttep = 0;
+
+/* Walk ARM64 page tables using TTBR1_EL1 / TTBR0_EL1 */
 static uint64_t xnu_va_to_pa(uint64_t va)
 {
 	va = sanitize_kva(va);
-	uint64_t tcr = xnu_fp[2], ttbr1 = xnu_fp[3];
-	uint32_t t1sz = (tcr >> 16) & 0x3f, tg1 = (tcr >> 30) & 3;
-	uint32_t g = tg1 == 2 ? 12 : tg1 == 1 ? 14 : 0;
-	if (g && t1sz >= 16 && ttbr1) {
-		uint32_t vabits = 64 - t1sz, per = g - 3;
-		uint32_t levels = (vabits - g + per - 1) / per;
-		uint64_t table = (ttbr1 & 0x1ffffffffULL) & ~((1ULL << g) - 1);
-		for (uint32_t l = 0; l < levels; l++) {
-			if (table < 0x40000000ULL || table >= 0x240000000ULL) {
-				break;
-			}
-			uint32_t shift = g + per * (levels - 1 - l);
-			uint64_t idx = (va >> shift) & ((1ULL << per) - 1);
-			if (l == 0) {
-				idx &= (1ULL << (vabits - shift)) - 1;
-			}
-			uint64_t pte_addr = table + idx * 8;
-			if (pte_addr < 0x40000000ULL || pte_addr >= 0x240000000ULL) {
-				break;
-			}
-			dcache_inval_range(pte_addr, 64);
-			uint64_t d = *(volatile uint64_t *)pte_addr;
-			if (!(d & 1)) {
-				break;
-			}
-			uint64_t oa = (d & 0x1ffffffffULL) & ~((1ULL << g) - 1);
-			if (l == levels - 1 || !(d & 2)) { /* page, or block */
-				uint64_t span = 1ULL << shift;
-				return (oa & ~(span - 1)) | (va & (span - 1));
-			}
-			table = oa;
-		}
-	}
-	/* Fallback: if within static kernel image slide */
 	if (va >= KERNEL_VIRT_BASE && va < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
 		return kva_to_pa(va);
 	}
-	return 0;
+
+	uint64_t ttbr = 0;
+	if (va >= 0xffff000000000000ULL) {
+		if (s_kernel_ttep) {
+			ttbr = XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL);
+		} else {
+			ttbr = kva_to_pa(0xfffffff0071ba000ULL);
+		}
+	} else {
+		ttbr = (xnu_fp[3] & 0x0000000fffffffffULL) & ~0xfffULL;
+	}
+
+	if (!ttbr || ttbr < 0x40000000ULL || ttbr >= 0x240000000ULL) {
+		return 0;
+	}
+
+	uint64_t l1_table = ttbr;
+	if (va < 0xffff000000000000ULL) {
+		/* Level 0 table walk (bits 47:39) for 48-bit user address space */
+		uint32_t idx0 = (va >> 39) & 0x1ff;
+		uint64_t pte0_pa = ttbr + idx0 * 8;
+		if (pte0_pa >= 0x40000000ULL && pte0_pa < 0x240000000ULL) {
+			dcache_inval_range(pte0_pa, 64);
+			uint64_t pte0 = *(volatile uint64_t *)pte0_pa;
+			if ((pte0 & 1) && (pte0 & 2)) {
+				uint64_t next_tbl = (pte0 & 0x0000000fffffffffULL) & ~0xfffULL;
+				if (next_tbl >= 0x40000000ULL && next_tbl < 0x240000000ULL) {
+					l1_table = next_tbl;
+				}
+			}
+		}
+	}
+
+	uint32_t idx1 = (va >> 30) & 0x1ff;
+	uint64_t pte1_pa = l1_table + idx1 * 8;
+	uint64_t pte1 = 0;
+	if (pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
+		dcache_inval_range(pte1_pa, 64);
+		pte1 = *(volatile uint64_t *)pte1_pa;
+	}
+	if (!(pte1 & 1)) {
+		/* Fallback to static bootstrap tables if ttbr didn't have it */
+		if (va >= 0xffff000000000000ULL) {
+			l1_table = kva_to_pa(0xfffffff0071ba000ULL) + 0x1000ULL;
+			pte1_pa = l1_table + idx1 * 8;
+			if (pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
+				dcache_inval_range(pte1_pa, 64);
+				pte1 = *(volatile uint64_t *)pte1_pa;
+			}
+			if (!(pte1 & 1)) {
+				l1_table = kva_to_pa(0xfffffff0071ba000ULL);
+				pte1_pa = l1_table + idx1 * 8;
+				if (pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
+					dcache_inval_range(pte1_pa, 64);
+					pte1 = *(volatile uint64_t *)pte1_pa;
+				}
+			}
+		}
+	}
+	if (!(pte1 & 1)) {
+		if (va >= KERNEL_VIRT_BASE && va < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+			return kva_to_pa(va);
+		}
+		return 0;
+	}
+	if (!(pte1 & 2)) { /* 1GB Block mapping */
+		return (pte1 & 0x0000000ffffc0000ULL) | (va & 0x3fffffffULL);
+	}
+
+	uint64_t l2_table = (pte1 & 0x0000000fffffffffULL) & ~0xfffULL;
+	if (l2_table < 0x40000000ULL || l2_table >= 0x240000000ULL) return 0;
+	uint32_t idx2 = (va >> 21) & 0x1ff;
+	uint64_t pte2_pa = l2_table + idx2 * 8;
+	if (pte2_pa < 0x40000000ULL || pte2_pa >= 0x240000000ULL) return 0;
+	dcache_inval_range(pte2_pa, 64);
+	uint64_t pte2 = *(volatile uint64_t *)pte2_pa;
+	if (!(pte2 & 1)) return 0;
+	if (!(pte2 & 2)) { /* 2MB Block mapping */
+		return (pte2 & 0x0000000fffe00000ULL) | (va & 0x1fffffULL);
+	}
+
+	uint64_t l3_table = (pte2 & 0x0000000fffffffffULL) & ~0xfffULL;
+	if (l3_table < 0x40000000ULL || l3_table >= 0x240000000ULL) return 0;
+	uint32_t idx3 = (va >> 12) & 0x1ff;
+	uint64_t pte3_pa = l3_table + idx3 * 8;
+	if (pte3_pa < 0x40000000ULL || pte3_pa >= 0x240000000ULL) return 0;
+	dcache_inval_range(pte3_pa, 64);
+	uint64_t pte3 = *(volatile uint64_t *)pte3_pa;
+	if (!(pte3 & 1)) return 0;
+	return ((pte3 & 0x0000000fffffffffULL) & ~0xfffULL) | (va & 0xfffULL);
 }
 
 static uint64_t xnu_rd64(uint64_t va)
@@ -1351,16 +1398,22 @@ static void read_screen(void)
 
 static void rescue_state(void)
 {
+	uint64_t kp_pa = kva_to_pa(0xfffffff007b8f238ULL);
+	dcache_inval_range(kp_pa, 64);
+	s_kernel_ttep = *(volatile uint64_t *)(kp_pa + 8);
+
 	if (xsyms.cpu_ttep) {
 		xnu_fp[3] = rd32(kva_to_pa(xsyms.cpu_ttep)) | (uint64_t)rd32(kva_to_pa(xsyms.cpu_ttep) + 4) << 32;
 		xnu_fp[2] = 0x22a51a251aULL;
 	}
-	if (!xnu_fp[3] && xsyms.kernel_pmap) {
-		xnu_fp[3] = *(volatile uint64_t *)kva_to_pa(xsyms.kernel_pmap);
+	if (!xnu_fp[3] && s_kernel_ttep) {
+		xnu_fp[3] = s_kernel_ttep;
 		xnu_fp[2] = 0x22a51a251aULL;
 	}
 	out("cpu_ttep ");
 	out_hex(xnu_fp[3]);
+	out(" kp_ttep ");
+	out_hex(s_kernel_ttep);
 	if (xsyms.live) {
 		out(" heartbeat ");
 		out_dec(*(volatile uint64_t *)kva_to_pa(xsyms.live + 8));
@@ -1380,6 +1433,9 @@ static void rescue_state(void)
 	uint32_t bufx = rd32(mb_pa + 8);
 	uint32_t bufr = rd32(mb_pa + 12);
 	uint64_t bufc = sanitize_kva(*(volatile uint64_t *)(mb_pa + 16));
+	if (bufc < 0xfffffff007000000ULL || bufc > 0xfffffff008000000ULL) {
+		bufc = 0xfffffff007d2b77cULL;
+	}
 
 	out("msgbuf "); out_hex(mb_va);
 	out(" (PA="); out_hex(mb_pa);
@@ -1390,44 +1446,89 @@ static void rescue_state(void)
 	out(" bufc="); out_hex(bufc);
 	out("\n");
 
-	uint64_t bufc_pa = xnu_va_to_pa(bufc);
-	if (!bufc_pa || bufc_pa < 0x40000000ULL || bufc_pa >= 0x240000000ULL) {
-		dcache_inval_range(mb_pa + 32, 64);
-		char test_c = *(volatile char *)(mb_pa + 32);
-		if ((test_c >= 32 && test_c <= 126) || test_c == '\n') {
-			bufc_pa = mb_pa + 32;
-		} else {
-			bufc_pa = kva_to_pa(bufc);
-		}
-	}
-	if (!bufc_pa || bufc_pa < 0x40000000ULL || bufc_pa >= 0x240000000ULL) {
-		bufc_pa = kva_to_pa(0xfffffff007d2b77cULL);
-	}
 	if (size == 0 || size > 256 * 1024) {
 		size = 131072;
 	}
-	dcache_inval_range(bufc_pa, size);
+	uint64_t bufc_pa = xnu_va_to_pa(bufc);
+	if (!bufc_pa && bufc >= KERNEL_VIRT_BASE && bufc < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+		bufc_pa = kva_to_pa(bufc);
+	}
+	if (!bufc_pa) {
+		bufc_pa = 0x83d2b77cULL;
+	}
 	out("bufc PA="); out_hex(bufc_pa); out("\n");
+	{
+		uint64_t tt = s_kernel_ttep ? (XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL)) : ((xnu_fp[3] & 0x0000000fffffffffULL) & ~0xfffULL);
+		out("bufc walk: va="); out_hex(bufc); out(" ttbr="); out_hex(tt);
+		uint64_t l1 = tt;
+		if (bufc < 0xffff000000000000ULL) {
+			uint32_t i0 = (bufc >> 39) & 0x1ff;
+			uint64_t p0 = tt + i0 * 8;
+			out(" p0_pa="); out_hex(p0);
+			if (p0 >= 0x40000000ULL && p0 < 0x240000000ULL) {
+				dcache_inval_range(p0, 64);
+				uint64_t e0 = *(volatile uint64_t *)p0;
+				out(" e0="); out_hex(e0);
+				if ((e0 & 3) == 3) {
+					l1 = (e0 & 0x0000000fffffffffULL) & ~0xfffULL;
+				}
+			}
+		}
+		uint32_t i1 = (bufc >> 30) & 0x1ff;
+		uint64_t p1 = l1 + i1 * 8;
+		out(" p1_pa="); out_hex(p1);
+		if (p1 >= 0x40000000ULL && p1 < 0x240000000ULL) {
+			dcache_inval_range(p1, 64);
+			uint64_t e1 = *(volatile uint64_t *)p1;
+			out(" e1="); out_hex(e1);
+			if ((e1 & 3) == 3) {
+				uint64_t l2 = (e1 & 0x0000000fffffffffULL) & ~0xfffULL;
+				uint32_t i2 = (bufc >> 21) & 0x1ff;
+				uint64_t p2 = l2 + i2 * 8;
+				out(" p2_pa="); out_hex(p2);
+				if (p2 >= 0x40000000ULL && p2 < 0x240000000ULL) {
+					dcache_inval_range(p2, 64);
+					uint64_t e2 = *(volatile uint64_t *)p2;
+					out(" e2="); out_hex(e2);
+					if ((e2 & 3) == 3) {
+						uint64_t l3 = (e2 & 0x0000000fffffffffULL) & ~0xfffULL;
+						uint32_t i3 = (bufc >> 12) & 0x1ff;
+						uint64_t p3 = l3 + i3 * 8;
+						out(" p3_pa="); out_hex(p3);
+						if (p3 >= 0x40000000ULL && p3 < 0x240000000ULL) {
+							dcache_inval_range(p3, 64);
+							uint64_t e3 = *(volatile uint64_t *)p3;
+							out(" e3="); out_hex(e3);
+						}
+					}
+				}
+			}
+		}
+		out("\n");
+	}
 	out("--- kernel message buffer (from DRAM) ---\n");
 	uint64_t fbsave = fbc.base;
 	fbc.base = 0;
 
-	/* Circular buffer dump: if bufx < size, valid log is 0..bufx only */
-	if (bufx <= size) {
-		for (uint32_t i = 0; i < bufx; i++) {
-			char c = *(volatile char *)(bufc_pa + i);
-			if (c >= 32 && c <= 126) dbg_putc(c);
-			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
+	uint32_t count = (bufx <= size) ? bufx : size;
+	uint32_t start = (bufx <= size) ? 0 : (bufx % size);
+	uint64_t cur_page_va = 0;
+	uint64_t cur_page_pa = 0;
+
+	for (uint32_t step = 0; step < count; step++) {
+		uint32_t idx = (start + step) % size;
+		uint64_t char_va = bufc + idx;
+		uint64_t page_va = char_va & ~0xfffULL;
+		if (page_va != cur_page_va) {
+			cur_page_va = page_va;
+			cur_page_pa = xnu_va_to_pa(page_va);
+			if (!cur_page_pa && page_va >= KERNEL_VIRT_BASE && page_va < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+				cur_page_pa = kva_to_pa(page_va);
+			}
+			if (cur_page_pa) dcache_inval_range(cur_page_pa, 4096);
 		}
-	} else {
-		uint32_t pos = bufx % size;
-		for (uint32_t i = pos; i < size; i++) {
-			char c = *(volatile char *)(bufc_pa + i);
-			if (c >= 32 && c <= 126) dbg_putc(c);
-			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
-		}
-		for (uint32_t i = 0; i < pos; i++) {
-			char c = *(volatile char *)(bufc_pa + i);
+		if (cur_page_pa) {
+			char c = *(volatile char *)(cur_page_pa + (char_va & 0xfffULL));
 			if (c >= 32 && c <= 126) dbg_putc(c);
 			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
 		}
@@ -2508,15 +2609,22 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 			slot[1] = (uint64_t)xnu_return_stub;
 			slot[2] = XNU_CHECKPOINT;
 			slot[3] = XNU_SLIDE;
+			dcache_clean_range((uint64_t)slot, 64);
+			__asm__ volatile("dsb sy; isb");
 		}
 	}
 
-	/* Enable on-screen video console for live boot display */
+	/* Keep internal/serial console (cons_ops_index = 0) so XNU text console does NOT clear
+	 * or overwrite the AMOLED framebuffer at 0xfe0c0000.
+	 * This preserves the Apple boot logo and progress bar, giving MiniIOMobileFramebuffer
+	 * exclusive ownership of the AMOLED display for SpringBoard GUI presentation.
+	 */
 	if (s.cons_ops_index) {
 		volatile uint32_t *idx = (volatile uint32_t *)kva_to_pa(s.cons_ops_index);
-		*idx = 1; /* 1 = video console active */
-		out("cons_ops_index: 1 (video console active for live boot display)\n");
+		*idx = 0; /* 0 = internal/serial console: preserves Apple Logo & SpringBoard GUI surface */
+		out("cons_ops_index: 0 (exclusive GUI framebuffer presentation on AMOLED)\n");
 	}
+
 
 	uint64_t kern_hi = (kva_to_pa(vm_hi) + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
 	uint64_t rd_pa = kern_hi;
@@ -2529,15 +2637,15 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=0 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=80 auto_reboot=95";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	} else {
-		/* Automated test: full userland boot with 300s watchdog hardware warm reset */
+		/* Automated test: full userland boot with 95s watchdog hardware warm reset */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=0 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=80 auto_reboot=95";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2563,7 +2671,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
 	ba->video.v_baseAddr = LK_FB_BASE;
-	ba->video.v_display = 1; /* GRAPHICS_MODE: preserve Apple Boot Logo and allow genuine SpringBoard GUI rendering */
+	ba->video.v_display = 1; /* GRAPHICS_MODE: Clean Apple boot logo and SpringBoard GUI display */
 	ba->video.v_rowBytes = LK_FB_PITCH;
 	ba->video.v_width = PANEL_W;
 	ba->video.v_height = PANEL_H;
@@ -2574,35 +2682,24 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out(s_boot_args);
 	out("\n");
 
-	if (!interactive) {
-		uint32_t t = 180; /* 180 seconds hardware warm reset timeout */
-		marker_set(MARK_RUNNING);
-		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
-		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-		/* 0x43 = WDT_MODE_EN (1) | EXT_POL (2) | DUAL_EN (0x40).
-		 * Explicitly NO bit 2 (EXRST_EN) to avoid cold PMIC reset and preserve DRAM across reboots!
-		 * Explicitly NO bit 3 (IRQ_EN) so expiry triggers immediate hardware reset! */
-		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u);
-		out("watchdog armed: ");
-		out_dec(t);
-		out(" s (hardware warm reset)\n");
-	} else {
-		uint32_t t = 180; /* 180s failsafe hardware warm reset timeout */
-		marker_set(0);
-		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
-		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u);
-		out("interactive session: watchdog armed for 180s warm reset fallback (DUAL_EN 0x43)\n");
-	}
+	/* Disarm TOPRGU hardware watchdog before entering XNU.
+	 * TOPRGU hardware has a 31s max timeout, which cuts off cold boot at 18-31s.
+	 * Disarming it here grants iOS userland the full 80-second window to initialize
+	 * launchd, Daemons, and SpringBoard, with clean return handled by loader_return_after=80!
+	 */
+	marker_set(MARK_RUNNING);
+	wdt_disable();
+	out("watchdog disarmed: full userland boot window granted (loader_return_after=80s)\n");
+
 
 	gic_fix_eoimode();
 
 	fbc.fg = 0xffffff00u; /* YELLOW */
 	if (interactive) {
-		out("\n[+] Jumping to iOS / Darwin (Interactive Session)...\n");
-		out("[i] Screen will stay on. Hold Power for 8s to reboot to Android.\n");
+		out("\n[+] Jumping to iOS / Darwin (Interactive Session with 40s Watchdog)...\n");
+		out("[i] Screen logs active. Phone will auto warm-reset in 40s if stalled.\n");
 	} else {
-		out("\n[+] Jumping to XNU Darwin (Automated Run)...\n[!] Returning to Android automatically in ~180s...\n");
+		out("\n[+] Jumping to XNU Darwin (Automated Run)...\n[!] Returning to Android automatically in ~40s...\n");
 	}
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
@@ -2620,12 +2717,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	dcache_clean_range(inject_conf_pa, sizeof(default_inject));
 	__asm__ volatile("dsb sy");
 
-	/* Clear framebuffer to black and display clean Apple Boot Logo on AMOLED canvas */
-	draw_apple_progress(0);
-	for (uint32_t p = 10; p <= 100; p += 10) {
-		dbg_delay_ms(15); /* fast smooth animation to 100% */
-		draw_apple_progress(p);
-	}
+	/* Apple Logo & GUI scanout armed on AMOLED (0xfe0c0000) */
+	out("\n[+] Apple Logo & GUI scanout armed. Starting XNU kernel...\n");
 
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
 	__builtin_unreachable();

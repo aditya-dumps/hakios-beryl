@@ -75,6 +75,7 @@ static inline void dbg_delay_ms(uint32_t ms)
 
 static inline void wdt_disable(void)
 {
+	wr32(TOPRGU_LENGTH, (31 << 5) | 0x8u);
 	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
 	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
 }
@@ -82,7 +83,7 @@ static inline void wdt_disable(void)
 /* A warm reset, as Linux's mtk_wdt_restart does it: DRAM (and so pstore) survives. */
 static inline void __attribute__((noreturn)) wdt_reset(void)
 {
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x47u);
+	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u);
 	wr32(TOPRGU_SWRST, TOPRGU_SWRST_KEY);
 	for (;;) {
 		__asm__ volatile("wfe");
@@ -106,6 +107,7 @@ struct ramoops_hdr {
 #define PMSG_CAP  (RAMOOPS_PMSG_SIZE - sizeof(struct ramoops_hdr))
 
 extern void dcache_clean_all(void);
+extern void dcache_clean_range(uint64_t va, uint64_t len);
 
 static inline void plog_reset(void)
 {
@@ -116,11 +118,16 @@ static inline void plog_reset(void)
 	PMSG_HDR->start = 0;
 	PMSG_HDR->size = 0;
 	__asm__ volatile("dsb sy");
+	dcache_clean_range(RAMOOPS_CONSOLE, 64);
+	dcache_clean_range(RAMOOPS_PMSG, 64);
+	__asm__ volatile("dsb sy; isb");
 }
 
 static inline void plog_flush(void)
 {
 	__asm__ volatile("dsb sy");
+	dcache_clean_range(RAMOOPS_CONSOLE, RAMOOPS_CONSOLE_SIZE);
+	dcache_clean_range(RAMOOPS_PMSG, RAMOOPS_PMSG_SIZE);
 	dcache_clean_all();
 	__asm__ volatile("dsb sy; isb");
 }

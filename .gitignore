@@ -33,3 +33,7 @@ out/
 logs/*
 !logs/last_run_pmsg.txt
 !logs/last_run_console.txt
+*-ramoops-*
+__pycache__/
+*.pyc
+

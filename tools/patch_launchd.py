@@ -55,7 +55,10 @@ def patch_file(path):
     struct.pack_into("<I", data, 0x53a8, 0x14000005) # b #0x1000053bc
     print(f"[+] Patched {path} at 0x53a8 (b #0x1000053bc: bypass disallow logging)")
 
-    # 3. Persona lookup bypass (0x2a758)
+    # 3. Persona lookup bypass (0x20758 & 0x2a758)
+    # 0x20758: b #0x1000207b0 (0x14000016) - completely skip posix_spawnattr_setpersona_np
+    struct.pack_into("<I", data, 0x20758, 0x14000016)
+    print(f"[+] Patched {path} at 0x20758 (b #0x1000207b0: bypass persona spawn attr setup)")
     # 0x2a758: kpersona_find_by_type wrapper -> return 0 (default system persona)
     struct.pack_into("<II", data, 0x2a758, 0x52800000, 0xd65f03c0) # mov w0, #0; ret
     print(f"[+] Patched {path} at 0x2a758 (mov w0, #0; ret: default persona 0, bypass No matching personas error)")
