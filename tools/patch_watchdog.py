@@ -56,83 +56,76 @@ init_patch = struct.pack("<6I",
 kdata[foff_pet_init + 0x08 : foff_pet_init + 0x08 + len(init_patch)] = init_patch
 print("[+] Patched _hv_wdt_pet_init with _ml_io_map(0x1c007000, 0x1000)")
 
-# 2. Patch _hv_wdt_pet to call our toprgu_pet_and_reset stub
-# This feeds TOPRGU_RESTART (0x1971) on EVERY 2s tick to keep MT6855 hardware watchdog alive!
-# At 80s (40 pets @ 2s), it writes TOPRGU_SWRST (0x1209) to trigger automated warm-reset to Android.
-# Branch to foff_stub (0xfffffff007463704) from foff_pet + 0x20:
-pet_patch = struct.pack("<10I",
-    0x97ffb592, # bl 0xfffffff007463704 (toprgu_pet_and_reset stub)
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f, # nop
-    0xd503201f  # nop
-)
-kdata[foff_pet + 0x20 : foff_pet + 0x20 + len(pet_patch)] = pet_patch
-print("[+] Patched _hv_wdt_pet: calls toprgu_pet_and_reset stub (automated 80s reset)")
+# 2. Patch _gic_irq_handler (+0xc0, 0xfffffff007477a94) to call our vtimer_pet_and_reset stub
+# This guarantees that on EVERY VTIMER tick, TOPRGU watchdog is fed,
+# and after 4096 ticks (~41s), hardware warm-reset to Android is automatically executed!
+va_gic_hook = 0xfffffff0074779d4 + 0xc0
+va_stub = 0xfffffff007463704
+diff_gic = va_stub - va_gic_hook
+imm26_gic = (diff_gic >> 2) & 0x03ffffff
+ins_gic = 0x94000000 | imm26_gic
+gic_patch = struct.pack("<I", ins_gic)
+kdata[foff_gic_irq + 0xc0 : foff_gic_irq + 0xc4] = gic_patch
+print(f"[+] Patched _gic_irq_handler VTIMER at {hex(foff_gic_irq + 0xc0)} to bl {hex(va_stub)} (ins: {hex(ins_gic)})")
 
 # 3. Patch interval from 10s to 2s
 kdata[foff_pet + 0x1f0 : foff_pet + 0x1f4] = struct.pack("<I", 0x52800040) # mov w0, #2
 print("[+] Patched _hv_wdt_pet interval from 10s to 2s")
 
-# 4. Install toprgu_pet_and_reset stub at 0xfffffff007463704
+# 4. Install vtimer_pet_and_reset stub at 0xfffffff007463704
 # AAPCS64 compliant leaf stub:
-# - Hooks _PE_halt_restart to toprgu_warm_reset so any panic(), reboot(), or auto_reboot warm-resets!
-# - Pets TOPRGU hardware watchdog (0x1971) on every 2s tick to keep MT6855 alive
-# - At 80s (40 pets @ 2s), triggers TOPRGU_SWRST (0x1209) for clean warm-reset to Android
-stub_code = struct.pack("<34I",
+# - PRESERVES x0 (regs pointer) so _rtclock_intr does not crash!
+# - Uses scratch w10 for TOPRGU_RESTART_KEY (0x1971)
+# - Pets TOPRGU hardware watchdog on every VTIMER tick
+# - Calls original _rtclock_intr (0xfffffff00746c828) with pristine x0
+# - At 4096 ticks (~41s), triggers TOPRGU_MODE (0x22000043) + TOPRGU_SWRST (0x1209) for clean warm-reset
+# - toprgu_warm_reset entry at 0xfffffff007463754 (hooked by _PE_halt_restart)
+# - If TOPRGU unmapped (x9 == 0), falls back to PSCI SYSTEM_RESET (smc #0)
+pc_bl = 0xfffffff007463704 + 16 * 4
+offset = 0xfffffff00746c828 - pc_bl
+ins_bl = 0x94000000 | ((offset >> 2) & 0x03ffffff)
+
+stub_code = struct.pack("<33I",
     0xa9be7bfd, # 0:  stp  x29, x30, [sp, #-32]!
-    0xf9000be3, # 1:  str  x19, [sp, #16]
-    0x910003fd, # 2:  mov  x29, sp
-    # Hook _PE_halt_restart (0xfffffff007d4dac0) -> toprgu_warm_reset (0xfffffff00746376c)
-    0xd000474a, # 3:  adrp x10, 0xfffffff007d4d000
-    0x9000000b, # 4:  adrp x11, 0xfffffff007463000
-    0x911db16b, # 5:  add  x11, x11, #0x76c (toprgu_warm_reset entry)
-    0xf905614b, # 6:  str  x11, [x10, #0xac0] (hook _PE_halt_restart!)
-    # Pet TOPRGU
-    0x900048a8, # 7:  adrp x8, _hv_wdt_enabled (page 0xfffffff007d77000)
-    0xf9400d09, # 8:  ldr  x9, [x8, #0x18] (TOPRGU base 0x1c007000 mapped by _hv_wdt_pet_init)
-    0xb40001c9, # 9:  cbz  x9, 2f (if not mapped yet, skip to 2: exit (+14 ins = +56 bytes))
-    0xb9400d02, # 10: ldr  w2, [x8, #0x0c] (pet counter at safe unused padding offset 0x0c)
-    0x11000442, # 11: add  w2, w2, #1 (counter++)
-    0xb9000d02, # 12: str  w2, [x8, #0x0c] (save updated counter)
-    0x7100a05f, # 13: cmp  w2, #40 (40 pets @ 2s = 80s)
-    0x540000a2, # 14: b.hs 1f (jump to 1: reset if >= 40 (+5 ins = +20 bytes))
-    0x52832e20, # 15: mov  w0, #0x1971 (TOPRGU_RESTART_KEY)
-    0xb9000920, # 16: str  w0, [x9, #8] (PET HARDWARE WATCHDOG: feeds TOPRGU_RESTART!)
-    0xd5033fdf, # 17: dsb  sy
-    0x14000005, # 18: b    2f (skip reset to 2: exit (+5 ins = +20 bytes))
-    # 1: Timed Warm Reset (at 80s)
-    0x52824120, # 19: mov  w0, #0x1209 (TOPRGU_SWRST_KEY for clean hardware warm reset)
-    0xb9001520, # 20: str  w0, [x9, #0x14] (TOPRGU_SWRST: triggers immediate warm reset to Android)
-    0xd5033fdf, # 21: dsb  sy
-    0xd5033f3f, # 22: isb
-    # 2: Exit
-    0xf9400be3, # 23: ldr  x19, [sp, #16]
-    0xa8c27bfd, # 24: ldp  x29, x30, [sp], #32
-    0xd65f03c0, # 25: ret
-    # toprgu_warm_reset function at 0xfffffff00746376c (called by PE_halt_restart on any panic/reboot)
-    0x900048a8, # 26: adrp x8, 0xfffffff007d77000
-    0xf9400d09, # 27: ldr  x9, [x8, #0x18] (TOPRGU base)
-    0xb40000a9, # 28: cbz  x9, 3f (wait if not mapped)
-    0x52824120, # 29: mov  w0, #0x1209 (TOPRGU_SWRST_KEY)
-    0xb9001520, # 30: str  w0, [x9, #0x14] (TOPRGU_SWRST: warm reset!)
-    0xd5033fdf, # 31: dsb  sy
-    0xd5033f3f, # 32: isb
-    0x14000000, # 33: 3: b 3b (spin until hardware resets)
+    0xf9000bf3, # 1:  str  x19, [sp, #16]
+    0xf90007e0, # 2:  str  x0, [sp, #8] (PRESERVE x0: arm_saved_state_t pointer!)
+    0x910003fd, # 3:  mov  x29, sp
+    # Pet logic
+    0x900048a8, # 4:  adrp x8, _hv_wdt_enabled (page 0xfffffff007d77000)
+    0xf9400d09, # 5:  ldr  x9, [x8, #0x18] (TOPRGU base 0x1c007000 mapped by _hv_wdt_pet_init)
+    0xb4000129, # 6:  cbz  x9, 2f (if not mapped yet, skip to call _rtclock_intr (+9 ins = +36 bytes))
+    0xb9400d02, # 7:  ldr  w2, [x8, #0x0c] (pet counter at safe unused padding offset 0x0c)
+    0x11000442, # 8:  add  w2, w2, #1 (counter++)
+    0xb9000d02, # 9:  str  w2, [x8, #0x0c] (save updated counter)
+    0x7140045f, # 10: cmp  w2, #4096 (4096 ticks @ ~100Hz = ~41s session window)
+    0x54000122, # 11: b.hs 1f (jump to 1: toprgu_warm_reset (+9 ins = +36 bytes))
+    0x52832e2a, # 12: mov  w10, #0x1971 (TOPRGU_RESTART_KEY in scratch w10!)
+    0xb900092a, # 13: str  w10, [x9, #8] (PET HARDWARE WATCHDOG: feeds TOPRGU_RESTART!)
+    0xd5033f9f, # 14: dsb  sy
+    # 2: Call original _rtclock_intr with restored x0 and return
+    0xf94007e0, # 15: ldr  x0, [sp, #8] (RESTORE x0: pristine regs pointer!)
+    ins_bl,     # 16: bl   _rtclock_intr (0xfffffff00746c828)
+    0xf9400bf3, # 17: ldr  x19, [sp, #16]
+    0xa8c27bfd, # 18: ldp  x29, x30, [sp], #32
+    0xd65f03c0, # 19: ret
+    # 1: toprgu_warm_reset function at 0xfffffff007463754 (called by PE_halt_restart or timed VTIMER)
+    0x900048a8, # 20: adrp x8, 0xfffffff007d77000
+    0xf9400d09, # 21: ldr  x9, [x8, #0x18] (TOPRGU base)
+    0xb40000e9, # 22: cbz  x9, 3f (jump to PSCI fallback if unmapped (+7 ins = +28 bytes))
+    0x52800860, # 23: mov  w0, #0x0043
+    0x72a44000, # 24: movk w0, #0x2200, lsl #16 (TOPRGU_MODE_KEY | 0x43)
+    0xb9000120, # 25: str  w0, [x9, #0x00] (arm TOPRGU_MODE with reset enable!)
+    0x52824120, # 26: mov  w0, #0x1209 (TOPRGU_SWRST_KEY)
+    0xb9001520, # 27: str  w0, [x9, #0x14] (TOPRGU_SWRST: instant warm reset!)
+    0x14000004, # 28: b    4f (spin until hardware resets)
+    # 3: PSCI SYSTEM_RESET fallback if TOPRGU base was unmapped
+    0xd2800120, # 29: mov  x0, #9
+    0xf2b08000, # 30: movk x0, #0x8400, lsl #16 (0x84000009 PSCI SYSTEM_RESET)
+    0xd4000003, # 31: smc  #0
+    0x14000000  # 32: 4: b 4b (spin)
 )
 kdata[foff_stub : foff_stub + len(stub_code)] = stub_code
-print(f"[+] Installed toprgu_pet_and_reset stub + PE_halt_restart hook at {hex(foff_stub)} (0xfffffff007463704)")
-
-# 5. Restore original _gic_irq_handler (+0xc0): bl _rtclock_intr (0x97ffd365)
-# DO NOT pet TOPRGU in the timer interrupt! Otherwise, any hang/freeze on the Apple logo
-# will never trigger the 15-second hardware watchdog reset.
-kdata[foff_gic_irq + 0xc0 : foff_gic_irq + 0xc4] = struct.pack("<I", 0x97ffd365) # bl _rtclock_intr
-print(f"[+] Restored _gic_irq_handler VTIMER at {hex(foff_gic_irq + 0xc0)} to original bl _rtclock_intr")
+print(f"[+] Installed vtimer_pet_and_reset stub + PE_halt_restart hook at {hex(foff_stub)} (0xfffffff007463704)")
 
 with open(KERNEL_PATH, "wb") as f:
     f.write(kdata)
