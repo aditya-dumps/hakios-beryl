@@ -77,7 +77,7 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #endif
 
 #ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0"
+#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 developer-mode=1 amfi_get_out_of_my_way=1"
 #endif
 
 #define XNU_ROOT_ARG        "rd=md0"
@@ -749,10 +749,26 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
+	dt_prop_str(&w, "name", "gic");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
 	dt_prop_u32(&w, "AAPL,phandle", 0x10);
-	dt_prop(&w, "interrupt-controller", NULL, 0);
+	dt_prop_str(&w, "interrupt-controller", "master");
 	uint64_t gic_reg[4] = { 0x0c000000 - 0x0c000000, 0x10000, 0x0c040000 - 0x0c000000, 0x200000 };
+	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	dt_end(&w);
+
+	dt_begin(&w, "interrupt-controller");
+	dt_prop_str(&w, "device_type", "interrupt-controller");
+	dt_prop_str(&w, "name", "interrupt-controller");
+	dt_prop_str(&w, "compatible", "arm,gic-v3");
+	dt_prop_u32(&w, "AAPL,phandle", 0x11);
+	dt_prop_str(&w, "interrupt-controller", "master");
+	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	dt_end(&w);
+
+	dt_begin(&w, "timer");
+	dt_prop_str(&w, "device_type", "timer");
+	dt_prop_str(&w, "compatible", "arm,armv8-timer");
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
 	dt_end(&w);
 
@@ -2513,7 +2529,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 -v rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
+		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2521,7 +2537,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	} else {
 		/* Automated test: full userland boot with 300s watchdog hardware warm reset */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 -v rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
+		const char *args = "debug=0x8 serial=3 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2547,7 +2563,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
 	ba->video.v_baseAddr = LK_FB_BASE;
-	ba->video.v_display = 0; /* TEXT_MODE: live on-screen text boot output; MiniIOMobileFramebuffer switches to graphics */
+	ba->video.v_display = 1; /* GRAPHICS_MODE: preserve Apple Boot Logo and allow genuine SpringBoard GUI rendering */
 	ba->video.v_rowBytes = LK_FB_PITCH;
 	ba->video.v_width = PANEL_W;
 	ba->video.v_height = PANEL_H;
@@ -2571,9 +2587,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		out_dec(t);
 		out(" s (hardware warm reset)\n");
 	} else {
+		uint32_t t = 180; /* 180s failsafe hardware warm reset timeout */
 		marker_set(0);
-		wdt_disable();
-		out("interactive session: watchdog disabled (iOS stays active)\n");
+		wr32(TOPRGU_LENGTH, (t << 5) | 0x8u);
+		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+		wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u);
+		out("interactive session: watchdog armed for 180s warm reset fallback (DUAL_EN 0x43)\n");
 	}
 
 	gic_fix_eoimode();
@@ -2593,6 +2612,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	dcache_clean_range(UFS_UTRD_PA, 4096);
 	dcache_clean_range(UFS_SHARED_LB_PA, sizeof(struct loader_block));
 	dcache_clean_range(UFS_NATIVE_AREA_PA, UFS_NATIVE_AREA_SZ);
+
+	/* Pre-populate kernel exec_inject_conf with libredwood shims for SpringBoard & backboardd */
+	uint64_t inject_conf_pa = kva_to_pa(0xfffffff007ef9db8ULL);
+	static const char default_inject[] = "/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU;/redwood/lib/libredwood-sb.dylib SpringBoard;/redwood/lib/libredwood-media.dylib mediaserverd;/redwood/lib/libredwood-app.dylib Sileo;/redwood/lib/libredwood-tweaks.dylib Preferences";
+	memcpy((void *)inject_conf_pa, default_inject, sizeof(default_inject));
+	dcache_clean_range(inject_conf_pa, sizeof(default_inject));
 	__asm__ volatile("dsb sy");
 
 	/* Clear framebuffer to black and display clean Apple Boot Logo on AMOLED canvas */
