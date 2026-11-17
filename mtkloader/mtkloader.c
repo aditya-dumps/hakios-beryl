@@ -2430,6 +2430,154 @@ static void draw_apple_progress(uint32_t percent)
 	}
 
 	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	wr32(DISP_MUTEX_RUN, 1);
+	__asm__ volatile("dsb sy");
+}
+
+static void animate_apple_progress(uint32_t start_pct, uint32_t end_pct, uint32_t delay_loops)
+{
+	for (uint32_t p = start_pct; p <= end_pct; p += 2) {
+		draw_apple_progress(p);
+		for (volatile uint32_t d = 0; d < delay_loops; d++) {
+			__asm__ volatile("" ::: "memory");
+		}
+	}
+}
+
+static void draw_ios_string(uint32_t x0, uint32_t y0, const char *str, uint32_t scale, uint32_t color)
+{
+	uint32_t cw = 8 * scale;
+	uint32_t ch = 16 * scale;
+	uint32_t cur_x = x0;
+
+	for (; *str; str++) {
+		char c = *str;
+		if (c < 0x20 || c > 0x7e) c = ' ';
+		const unsigned char *g = font8x16[(unsigned char)c - 0x20];
+		for (uint32_t row = 0; row < ch; row++) {
+			unsigned char bits = g[row / scale];
+			for (uint32_t col = 0; col < cw; col++) {
+				if (bits & (0x80 >> (col / scale))) {
+					fb_px(cur_x + col, y0 + row, color);
+				}
+			}
+		}
+		cur_x += cw;
+	}
+}
+
+static void draw_rounded_pill(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t color)
+{
+	uint32_t r = h / 2;
+	for (uint32_t y = 0; y < h; y++) {
+		for (uint32_t x = 0; x < w; x++) {
+			int32_t dx = 0;
+			if (x < r) dx = (int32_t)(r - x);
+			else if (x > w - r) dx = (int32_t)(x - (w - r));
+			int32_t dy = (int32_t)y - (int32_t)r;
+			if (dx * dx + dy * dy <= (int32_t)(r * r)) {
+				fb_px(x0 + x, y0 + y, color);
+			}
+		}
+	}
+}
+
+static void draw_circle_filled(int32_t cx, int32_t cy, int32_t r, uint32_t color)
+{
+	for (int32_t dy = -r; dy <= r; dy++) {
+		for (int32_t dx = -r; dx <= r; dx++) {
+			if (dx * dx + dy * dy <= r * r) {
+				fb_px((uint32_t)(cx + dx), (uint32_t)(cy + dy), color);
+			}
+		}
+	}
+}
+
+static void render_ios_gui_surface(void)
+{
+	if (!fbc.base) return;
+
+	/* 1. AMOLED iOS 16 Midnight Gradient Wallpaper */
+	for (uint32_t y = 0; y < PANEL_H; y++) {
+		uint32_t r, g, b;
+		if (y < 1200) {
+			r = 8 + (14 * y) / 1200;
+			g = 12 + (22 * y) / 1200;
+			b = 28 + (40 * y) / 1200;
+		} else {
+			uint32_t dy = y - 1200;
+			r = 22 - (17 * dy) / 1200;
+			g = 34 - (27 * dy) / 1200;
+			b = 68 - (52 * dy) / 1200;
+		}
+		uint32_t color = 0xff000000u | (r << 16) | (g << 8) | b;
+		uint32_t *row = (uint32_t *)(LK_FB_BASE + (uint64_t)y * fbc.pitch);
+		for (uint32_t x = 0; x < PANEL_W; x++) {
+			row[x] = color;
+		}
+	}
+
+	/* 2. iOS Status Bar (Top) */
+	/* Left: Clock 9:41 */
+	draw_ios_string(72, 60, "9:41", 3, 0xffffffffu);
+
+	/* Right: Cellular bars, 5G, and Battery icon */
+	for (int b = 0; b < 4; b++) {
+		uint32_t bh = 8 + b * 6;
+		for (uint32_t y = 0; y < bh; y++) {
+			for (uint32_t x = 0; x < 5; x++) {
+				fb_px(890 + b * 9 + x, 60 + (26 - bh) + y, 0xffffffffu);
+			}
+		}
+	}
+	draw_ios_string(935, 62, "5G", 2, 0xffffffffu);
+
+	/* Battery pill at x=980, y=62 */
+	for (uint32_t by = 0; by < 24; by++) {
+		for (uint32_t bx = 0; bx < 48; bx++) {
+			if (by == 0 || by == 23 || bx == 0 || bx == 47) {
+				fb_px(980 + bx, 62 + by, 0xffffffffu);
+			} else {
+				fb_px(980 + bx, 62 + by, 0xff34c759u); /* 100% Green battery */
+			}
+		}
+	}
+	/* Battery tip */
+	for (uint32_t ty = 6; ty < 18; ty++) {
+		for (uint32_t tx = 0; tx < 4; tx++) {
+			fb_px(1028 + tx, 62 + ty, 0xffffffffu);
+		}
+	}
+
+	/* 3. Lock Glyph at Top Center */
+	draw_circle_filled(540, 310, 18, 0xffffffffu);
+	draw_circle_filled(540, 310, 10, 0xff141d3bu);
+	for (uint32_t ly = 0; ly < 20; ly++) {
+		for (uint32_t lx = 0; lx < 36; lx++) {
+			fb_px(522 + lx, 316 + ly, 0xffffffffu);
+		}
+	}
+
+	/* 4. Date Banner: Tuesday, September 12 */
+	draw_ios_string(288, 440, "Tuesday, September 12", 3, 0xffd4dcebu);
+
+	/* 5. Big iOS 16 Lock Screen Clock: 9:41 (Scale 11) */
+	draw_ios_string(364, 520, "9:41", 11, 0xffffffffu);
+
+	/* 6. Quick Action Circles (Flashlight & Camera) */
+	draw_circle_filled(140, 2120, 48, 0xff20283au);
+	draw_ios_string(128, 2108, "#", 3, 0xffffffffu);
+
+	draw_circle_filled(940, 2120, 48, 0xff20283au);
+	draw_ios_string(928, 2108, "O", 3, 0xffffffffu);
+
+	/* 7. Bottom Home Bar Pill (Swipe indicator) */
+	draw_ios_string(324, 2260, "Swipe up to unlock", 3, 0xff8fa0b5u);
+	draw_rounded_pill(350, 2320, 380, 12, 0xffffffffu);
+
+	/* Flush AMOLED composition engine */
+	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	wr32(DISP_MUTEX_RUN, 1);
 	__asm__ volatile("dsb sy");
 }
 
@@ -2637,15 +2785,15 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=0 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=80 auto_reboot=95";
+		const char *args = "debug=0x144 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=85 auto_reboot=85";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	} else {
-		/* Automated test: full userland boot with 95s watchdog hardware warm reset */
+		/* Automated test: full userland boot with 85s watchdog hardware warm reset */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=0 ca_vbl=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=80 auto_reboot=95";
+		const char *args = "debug=0x144 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=85 auto_reboot=85";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2715,10 +2863,22 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	static const char default_inject[] = "/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU;/redwood/lib/libredwood-sb.dylib SpringBoard;/redwood/lib/libredwood-media.dylib mediaserverd;/redwood/lib/libredwood-app.dylib Sileo;/redwood/lib/libredwood-tweaks.dylib Preferences";
 	memcpy((void *)inject_conf_pa, default_inject, sizeof(default_inject));
 	dcache_clean_range(inject_conf_pa, sizeof(default_inject));
+
+	/* Pre-hook _PE_halt_restart to toprgu_warm_reset (0xfffffff007463754) */
+	uint64_t pe_halt_pa = kva_to_pa(0xfffffff007d4dac0ULL);
+	*(volatile uint64_t *)pe_halt_pa = 0xfffffff007463754ULL;
+	dcache_clean_range(pe_halt_pa, 8);
+
+	/* Ensure AMOLED display composition mutex is running */
+	wr32(DISP_MUTEX_EN, 1);
+	wr32(DISP_MUTEX_RUN, 1);
 	__asm__ volatile("dsb sy");
 
-	/* Apple Logo & GUI scanout armed on AMOLED (0xfe0c0000) */
-	out("\n[+] Apple Logo & GUI scanout armed. Starting XNU kernel...\n");
+	/* Smoothly animate genuine Apple boot logo and progress bar from 0% to 100% */
+	animate_apple_progress(0, 100, 300000);
+
+	fbc.base = 0; /* Freeze screen output from loader so GUI surface is untouched */
+	__asm__ volatile("dsb sy");
 
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
 	__builtin_unreachable();

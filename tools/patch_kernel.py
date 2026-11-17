@@ -764,6 +764,12 @@ print("[+] Installed Patch 38 at 0x471a10: _loader_jump T0SZ check bypass -> b 0
 struct.pack_into("<I", kdata, 0x471b90, 0xf284a324) # movk x4, #0x2519
 print("[+] Installed Patch 39 at 0x471b90: _loader_jump TCR_EL1 T0SZ=25 setup -> movk x4, #0x2519")
 
+# Patch 40: Neutralize _switch_to_video_console at 0x4238e0 (VA 0xfffffff0074278e0)
+# Replace first instruction with `ret` (0xd65f03c0) so cons_ops_index stays 0
+# and XNU never clears or overwrites the Apple logo and SpringBoard GUI surface!
+struct.pack_into("<I", kdata, 0x4238e0, 0xd65f03c0) # ret
+print("[+] Installed Patch 40 at 0x4238e0: _switch_to_video_console neutralized -> ret (GUI preserved)")
+
 
 
 with open(KERNEL_PATH, "wb") as f:
