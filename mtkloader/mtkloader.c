@@ -2864,9 +2864,9 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	memcpy((void *)inject_conf_pa, default_inject, sizeof(default_inject));
 	dcache_clean_range(inject_conf_pa, sizeof(default_inject));
 
-	/* Pre-hook _PE_halt_restart to toprgu_warm_reset (0xfffffff007463754) */
+	/* Pre-hook _PE_halt_restart to toprgu_warm_reset (0xfffffff007462810) */
 	uint64_t pe_halt_pa = kva_to_pa(0xfffffff007d4dac0ULL);
-	*(volatile uint64_t *)pe_halt_pa = 0xfffffff007463754ULL;
+	*(volatile uint64_t *)pe_halt_pa = 0xfffffff007462810ULL;
 	dcache_clean_range(pe_halt_pa, 8);
 
 	/* Ensure AMOLED display composition mutex is running */

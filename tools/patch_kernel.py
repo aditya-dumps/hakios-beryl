@@ -770,6 +770,71 @@ print("[+] Installed Patch 39 at 0x471b90: _loader_jump TCR_EL1 T0SZ=25 setup ->
 struct.pack_into("<I", kdata, 0x4238e0, 0xd65f03c0) # ret
 print("[+] Installed Patch 40 at 0x4238e0: _switch_to_video_console neutralized -> ret (GUI preserved)")
 
+# Patch 41: Watchdog & Safe TOPRGU Warm Reset Unification
+# 1. Clean NOP padding at 0x45f704 to 0x45f730 (eliminates broken watchdog stub collision with Patch 30/31)
+for i in range(11):
+    struct.pack_into("<I", kdata, 0x45f704 + i * 4, 0xd503201f)
+print("[+] Cleaned NOP padding at 0x45f704-0x45f730")
+
+# 2. Restore _gic_irq_handler + 0xc0 (0x473a94) to original pristine `bl _rtclock_intr` (0x97ffd365)
+# This completely eliminates VTIMER interrupt stack corruption on tick 1!
+struct.pack_into("<I", kdata, 0x473a94, 0x97ffd365)
+print("[+] Restored _gic_irq_handler VTIMER at 0x473a94 to original bl _rtclock_intr")
+
+# 3. In _hv_wdt_pet_init (0xacfd34): Map MediaTek TOPRGU watchdog registers (0x1c007000) via _ml_io_map
+init_patch = struct.pack("<6I",
+    0xd28e0000, # mov x0, #0x7000
+    0xf2a38000, # movk x0, #0x1c00, lsl #16 -> x0 = 0x1c007000
+    0xd2820001, # mov x1, #0x1000
+    0x97e64d1e, # bl _ml_io_map
+    0x90001521, # adrp x1, _hv_wdt_enabled
+    0xf9000c20, # str x0, [x1, #0x18]
+)
+kdata[0xacfd34 : 0xacfd34 + len(init_patch)] = init_patch
+print("[+] Patched _hv_wdt_pet_init with _ml_io_map(0x1c007000, 0x1000)")
+
+# 4. In _hv_wdt_pet (0x4720bc): Inline 100% self-contained TOPRGU watchdog pet (feeds 0x1971 every 2s)
+pet_inline = struct.pack("<10I",
+    0x90004808, # adrp x8, 0xfffffff007d77000 (_hv_wdt_enabled page)
+    0xf9400d09, # ldr  x9, [x8, #0x18] (TOPRGU base mapped by _hv_wdt_pet_init)
+    0xb4000089, # cbz  x9, +16 (skip if NULL)
+    0x52832e2a, # mov  w10, #0x1971 (TOPRGU_RESTART_KEY)
+    0xb900092a, # str  w10, [x9, #8] (feed TOPRGU_RESTART)
+    0xd5033fdf, # dsb  sy
+    0xd503201f, # nop
+    0xd503201f, # nop
+    0xd503201f, # nop
+    0xd503201f  # nop
+)
+kdata[0x4720bc : 0x4720bc + len(pet_inline)] = pet_inline
+struct.pack_into("<I", kdata, 0x47228c, 0x52800040) # mov w0, #2 (pet interval 2s)
+print("[+] Installed inline TOPRGU watchdog pet in _hv_wdt_pet (2s interval)")
+
+# 5. Install toprgu_warm_reset stub in clean NOP padding at 0x45e810 (VA 0xfffffff007462810)
+toprgu_stub = struct.pack("<14I",
+    0x900048a8, # adrp x8, 0xfffffff007d77000
+    0xf9400d09, # ldr  x9, [x8, #0x18]
+    0xb4000109, # cbz  x9, 1f (+32 bytes to PSCI fallback)
+    0x52800860, # mov  w0, #0x0043
+    0x72a44000, # movk w0, #0x2200, lsl #16 (TOPRGU_MODE_KEY | 0x43)
+    0xb9000120, # str  w0, [x9, #0x00] (arm TOPRGU_MODE!)
+    0x52824120, # mov  w0, #0x1209 (TOPRGU_SWRST_KEY)
+    0xb9001520, # str  w0, [x9, #0x14] (TOPRGU_SWRST: instant warm reset!)
+    0xd5033fdf, # dsb  sy
+    0x14000004, # b    2f (+16 bytes: spin)
+    # 1: PSCI SYSTEM_RESET fallback
+    0xd2800120, # mov  x0, #9
+    0xf2b08000, # movk x0, #0x8400, lsl #16
+    0xd4000003, # smc  #0
+    0x14000000  # 2: spin loop: b 2b
+)
+kdata[0x45e810 : 0x45e810 + len(toprgu_stub)] = toprgu_stub
+print("[+] Installed toprgu_warm_reset stub at 0x45e810 (VA 0xfffffff007462810)")
+
+# 6. Hook _PE_halt_restart pointer at 0xd4dac0 (VA 0xfffffff007d4dac0) -> toprgu_warm_reset (0xfffffff007462810)
+struct.pack_into("<Q", kdata, 0xd4dac0, 0xfffffff007462810)
+print("[+] Hooked _PE_halt_restart pointer to 0xfffffff007462810")
+
 
 
 with open(KERNEL_PATH, "wb") as f:
