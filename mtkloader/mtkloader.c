@@ -120,12 +120,13 @@ struct boot_video {
 
 #define BOOT_LINE_LENGTH 608
 
+/* pexpert/pexpert/arm64/boot.h: virtBase comes first (start.s reads BA_VIRT_BASE at 8, BA_PHYS_BASE at 16). */
 struct boot_args {
 	uint16_t revision;
 	uint16_t version;
 	uint32_t __pad;
-	uint64_t physBase;
 	uint64_t virtBase;
+	uint64_t physBase;
 	uint64_t memSize;
 	uint64_t topOfKernelData;
 	struct boot_video video;
@@ -137,11 +138,14 @@ struct boot_args {
 	uint64_t memSizeActual;
 };
 
-_Static_assert(__builtin_offsetof(struct boot_args, physBase) == 8, "boot_args");
-_Static_assert(__builtin_offsetof(struct boot_args, virtBase) == 16, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, virtBase) == 8, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, physBase) == 16, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, memSize) == 24, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, topOfKernelData) == 32, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, video) == 40, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, deviceTreeP) == 96, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, commandLine) == 108, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, bootFlags) == 720, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, bootFlags) == 720, "boot_args");
 
 #define SYS_UFS_LBA_START   61689024ULL
@@ -2790,14 +2794,16 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		memcpy((void *)rd_pa, pi.ramdisk, pi.ramdisk_size);
 	}
 
+	uint32_t wdt_timeout_sec = 31;
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=25 auto_reboot=28";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=45 auto_reboot=50";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
+		wdt_timeout_sec = 52;
 	} else {
 		/* Automated test: full userland boot with 31s hardware watchdog warm reset */
 		verify_apfs_container();
@@ -2806,6 +2812,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
+		wdt_timeout_sec = 31;
 	}
 
 	uint64_t sys_size = 0;
@@ -2819,8 +2826,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	memset(ba, 0, sizeof(*ba));
 	ba->revision = 2;
 	ba->version = 2;
-	ba->physBase = XNU_PHYS_BASE;
 	ba->virtBase = KERNEL_VIRT_BASE;
+	ba->physBase = XNU_PHYS_BASE;
 	ba->memSize = XNU_MEM_SIZE;
 	ba->memSizeActual = ba->memSize;
 	ba->topOfKernelData = top;
@@ -2838,7 +2845,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out(s_boot_args);
 	out("\n");
 
-	/* Arm TOPRGU hardware watchdog for 31 seconds.
+	/* Arm TOPRGU hardware watchdog for guaranteed automatic warm reset & DRAM survival.
 	 * MediaTek MT6855 TOPRGU requires key 0x22000000 with mode 0x43 (warm reset) and bit 0 (enable).
 	 * If XNU hangs, halts, or panics, the hardware watchdog triggers an automatic warm reset.
 	 * Because DRAM survives warm reset, mtkloader detects MARK_RUNNING on reboot,
@@ -2846,10 +2853,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	 * flushes everything into ramoops, and boots Android cleanly!
 	 */
 	marker_set(MARK_RUNNING);
-	wr32(TOPRGU_LENGTH, (31 << 5) | 0x8u);
+	wr32(TOPRGU_LENGTH, (wdt_timeout_sec << 5) | 0x8u);
 	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
 	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u | 0x01u);
-	out("watchdog armed: 31s timeout for guaranteed hardware warm reset & DRAM survival\n");
+	out("watchdog armed: ");
+	out_dec(wdt_timeout_sec);
+	out("s timeout for guaranteed hardware warm reset & DRAM survival\n");
 
 
 	gic_fix_eoimode();
