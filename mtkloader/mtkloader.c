@@ -123,8 +123,9 @@ struct boot_video {
 struct boot_args {
 	uint16_t revision;
 	uint16_t version;
-	uint64_t virtBase;
+	uint32_t __pad;
 	uint64_t physBase;
+	uint64_t virtBase;
 	uint64_t memSize;
 	uint64_t topOfKernelData;
 	struct boot_video video;
@@ -136,8 +137,8 @@ struct boot_args {
 	uint64_t memSizeActual;
 };
 
-_Static_assert(__builtin_offsetof(struct boot_args, virtBase) == 8, "boot_args");
-_Static_assert(__builtin_offsetof(struct boot_args, physBase) == 16, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, physBase) == 8, "boot_args");
+_Static_assert(__builtin_offsetof(struct boot_args, virtBase) == 16, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, video) == 40, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, deviceTreeP) == 96, "boot_args");
 _Static_assert(__builtin_offsetof(struct boot_args, commandLine) == 108, "boot_args");
