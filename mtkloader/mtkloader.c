@@ -2862,12 +2862,6 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	dcache_clean_range(UFS_SHARED_LB_PA, sizeof(struct loader_block));
 	dcache_clean_range(UFS_NATIVE_AREA_PA, UFS_NATIVE_AREA_SZ);
 
-	/* Pre-populate kernel exec_inject_conf with libredwood shims for SpringBoard & backboardd */
-	uint64_t inject_conf_pa = kva_to_pa(0xfffffff007ef9db8ULL);
-	static const char default_inject[] = "/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU;/redwood/lib/libredwood-sb.dylib SpringBoard;/redwood/lib/libredwood-media.dylib mediaserverd;/redwood/lib/libredwood-app.dylib Sileo;/redwood/lib/libredwood-tweaks.dylib Preferences";
-	memcpy((void *)inject_conf_pa, default_inject, sizeof(default_inject));
-	dcache_clean_range(inject_conf_pa, sizeof(default_inject));
-
 	/* Ensure AMOLED display composition mutex is running */
 	wr32(DISP_MUTEX_EN, 1);
 	wr32(DISP_MUTEX_RUN, 1);
