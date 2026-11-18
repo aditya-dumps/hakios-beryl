@@ -764,6 +764,13 @@ print("[+] Installed Patch 38 at 0x471a10: _loader_jump T0SZ check bypass -> b 0
 struct.pack_into("<I", kdata, 0x471b90, 0xf284a324) # movk x4, #0x2519
 print("[+] Installed Patch 39 at 0x471b90: _loader_jump TCR_EL1 T0SZ=25 setup -> movk x4, #0x2519")
 
+# Patch 40: _PE_kputc function pointer at 0x252998 (VA 0xfffffff007256998)
+# In genuine XNU, PE_kputc defaults to NULL because there is no Apple Serial chip on MT6855.
+# Point _PE_kputc to _loader_log_putc (0xfffffff007475178) so every kprintf(), assertion, and panic log
+# is captured directly into _loader_log in DRAM!
+struct.pack_into("<Q", kdata, 0x252998, 0xfffffff007475178)
+print("[+] Installed Patch 40 at 0x252998: _PE_kputc -> _loader_log_putc (0xfffffff007475178)")
+
 
 
 with open(KERNEL_PATH, "wb") as f:

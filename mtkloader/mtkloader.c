@@ -255,7 +255,7 @@ struct xnu_syms {
 	    gic_unhandled_count, gic_last_unhandled, gic_active_iar, host_keep, host_keep_len, host_keep_dropped,
 	    hk_keep, hk_keep_len, hk_keep_dropped, cpu_init, loader_jump, cons_ops_index,
 	    switch_to_serial_console, switch_to_video_console,
-	    vcputc_options, gc_initialized, gc_enabled, gc_x, gc_y, gc_enable;
+	    vcputc_options, gc_initialized, gc_enabled, gc_x, gc_y, gc_enable, pe_kputc;
 };
 
 static struct xnu_syms xsyms;
@@ -475,6 +475,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 		"_cpu_init", "_loader_jump", "_cons_ops_index",
 		"_switch_to_serial_console", "_switch_to_video_console",
 		"_vcputc_options", "_gc_initialized", "_gc_enabled", "_gc_x", "_gc_y", "_gc_enable",
+		"_PE_kputc",
 	};
 	uint64_t *slots = (uint64_t *)s;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
@@ -494,7 +495,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 	const char *strs = (const char *)(kernel + st->stroff);
 	for (uint32_t i = 0; i < st->nsyms; i++) {
 		const char *n = strs + sym[i].n_strx;
-		if (n[0] != '_' || (n[1] != 'l' && n[1] != 'v' && n[1] != 'd' && n[1] != 'i' && n[1] != 'm' && n[1] != 'c' && n[1] != 'g' && n[1] != 'n' && n[1] != 't' && n[1] != 'r' && n[1] != 'h' && n[1] != 's')) {
+		if (n[0] != '_' || (n[1] != 'l' && n[1] != 'v' && n[1] != 'd' && n[1] != 'i' && n[1] != 'm' && n[1] != 'c' && n[1] != 'g' && n[1] != 'n' && n[1] != 't' && n[1] != 'r' && n[1] != 'h' && n[1] != 's' && n[1] != 'P')) {
 			continue;
 		}
 		for (unsigned k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
@@ -2693,6 +2694,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		if (rel >= -(1 << 25) && rel < (1 << 25)) {
 			up[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
 		}
+	}
+
+	if (s.pe_kputc && s.log_putc) {
+		volatile uint64_t *pk = (volatile uint64_t *)kva_to_pa(s.pe_kputc);
+		*pk = s.log_putc;
+		out("PE_kputc -> _loader_log_putc: hooked console logging\n");
 	}
 
 	/* Allow XNU video console output for on-screen visibility */
