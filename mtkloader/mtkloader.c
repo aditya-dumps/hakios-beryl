@@ -2785,15 +2785,15 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=80 auto_reboot=85";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=25 auto_reboot=28";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
 	} else {
-		/* Automated test: full userland boot with 85s watchdog hardware warm reset */
+		/* Automated test: full userland boot with 31s hardware watchdog warm reset */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=80 auto_reboot=85";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=25 auto_reboot=28";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2830,14 +2830,18 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	out(s_boot_args);
 	out("\n");
 
-	/* Disarm TOPRGU hardware watchdog before entering XNU.
-	 * TOPRGU hardware has a 31s max timeout, which cuts off cold boot at 18-31s.
-	 * Disarming it here grants iOS userland the full 80-second window to initialize
-	 * launchd, Daemons, and SpringBoard, with clean return handled by loader_return_after=80!
+	/* Arm TOPRGU hardware watchdog for 31 seconds.
+	 * MediaTek MT6855 TOPRGU requires key 0x22000000 with mode 0x43 (warm reset) and bit 0 (enable).
+	 * If XNU hangs, halts, or panics, the hardware watchdog triggers an automatic warm reset.
+	 * Because DRAM survives warm reset, mtkloader detects MARK_RUNNING on reboot,
+	 * runs read_screen() to OCR all on-screen logs, recovers XNU's in-memory msgbuf,
+	 * flushes everything into ramoops, and boots Android cleanly!
 	 */
 	marker_set(MARK_RUNNING);
-	wdt_disable();
-	out("watchdog disarmed: full userland boot window granted (loader_return_after=80s)\n");
+	wr32(TOPRGU_LENGTH, (31 << 5) | 0x8u);
+	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u | 0x01u);
+	out("watchdog armed: 31s timeout for guaranteed hardware warm reset & DRAM survival\n");
 
 
 	gic_fix_eoimode();
