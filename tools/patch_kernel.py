@@ -819,9 +819,28 @@ print("[+] Installed Patch 47 at 0x804b24: _log_putc lock drop bypass -> nop")
 # 0x471bc4 (VA 0xfffffff007475bc4):
 # adrp x8, 0xfffffff007d77000 (0xd0004808)
 # str x0, [x8, #0x10] (0xf9000900)
-# Writes the active checkpoint number into DRAM on every milestone in _arm_init and kernel bootstrap!
-struct.pack_into("<II", kdata, 0x471bc4, 0xd0004808, 0xf9000900)
-print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> adrp x8, 0xfffffff007d77000; str x0, [x8, #0x10]")
+# dc cvac, x8 (0xd50b7a28) - hardware dcache flush to physical DRAM
+# dsb sy (0xd5033f9f) - data synchronization barrier
+struct.pack_into("<IIII", kdata, 0x471bc4, 0xd0004808, 0xf9000900, 0xd50b7a28, 0xd5033f9f)
+print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record checkpoint and flush to DRAM")
+
+# Patch 49: dyld_kernel_fixups MH_FILESET assertion bypass at 0x452488 (VA 0xfffffff007456488)
+# In genuine iOS, kernels are prelinked MH_FILESETs. On standalone mach-o, kc_mh->filetype != MH_FILESET,
+# causing dyld_kernel_fixups to panic at 0xfffffff0074569b0.
+# Branch directly to clean epilogue at 0xfffffff0074569a0 (0x14000146).
+struct.pack_into("<I", kdata, 0x452488, 0x14000146)
+print("[+] Installed Patch 49 at 0x452488: dyld_kernel_fixups MH_FILESET panic bypass -> b 0x74569a0")
+
+# Patch 50: NOP dyld_kernel_fixups call in _arm_init at 0x452b9c (VA 0xfffffff007456b9c)
+# Eliminates unneeded dyld fixup pass on pre-slid kernel, proceeding directly to boot_args copy & Checkpoint 10.
+struct.pack_into("<I", kdata, 0x452b9c, 0xd503201f)
+print("[+] Installed Patch 50 at 0x452b9c: _arm_init dyld_kernel_fixups caller -> nop")
+
+# Patch 51: Neutralize _SecureDTLookupEntry chosen node panic at 0x452c48 (VA 0xfffffff007456c48)
+# b.ne 0xfffffff0074574e8 -> nop
+struct.pack_into("<I", kdata, 0x452c48, 0xd503201f)
+print("[+] Installed Patch 51 at 0x452c48: chosen node failure panic bypass -> nop")
+
 
 
 
