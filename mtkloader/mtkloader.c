@@ -888,11 +888,11 @@ void loader_fault(uint64_t vec, uint64_t esr, uint64_t elr, uint64_t far)
 
 static inline uint64_t sanitize_kva(uint64_t va)
 {
-	/* Strip PAC tag bits: in XNU, kernel VAs reside in 0xfffffff000000000..0xfffffff0ffffffff */
-	if ((va & 0x0000000f00000000ULL) == 0x0000000700000000ULL ||
-	    (va & 0x0000000f00000000ULL) == 0x0000000800000000ULL ||
-	    (va & 0x0000000f00000000ULL) == 0x0000000400000000ULL) {
-		return 0xfffffff000000000ULL | (va & 0x0ffffffffULL);
+	/* Strip ARM64 PAC signature tags (bits 63:32 or bits 47:32) */
+	if (!va) return 0;
+	uint64_t low36 = va & 0x0000000fffffffffULL;
+	if (low36 >= 0x04000000ULL && low36 < 0x85000000ULL) {
+		return 0xfffffff000000000ULL | low36;
 	}
 	if ((va >> 48) == 0xffff || (va >> 48) == 0x0000) {
 		return va | 0xffff000000000000ULL;
@@ -1464,7 +1464,9 @@ static void rescue_state(void)
 	}
 
 	if (xsyms.cpu_ttep) {
-		uint64_t raw_cpu = rd32(kva_to_pa(xsyms.cpu_ttep)) | (uint64_t)rd32(kva_to_pa(xsyms.cpu_ttep) + 4) << 32;
+		uint64_t cpu_ttep_pa = kva_to_pa(xsyms.cpu_ttep);
+		dcache_inval_range(cpu_ttep_pa, 64);
+		uint64_t raw_cpu = rd32(cpu_ttep_pa) | (uint64_t)rd32(cpu_ttep_pa + 4) << 32;
 		xnu_fp[3] = sanitize_kva(raw_cpu);
 		xnu_fp[2] = 0x22a51a251aULL;
 	}
@@ -1477,15 +1479,19 @@ static void rescue_state(void)
 	out(" kp_ttep ");
 	out_hex(s_kernel_ttep);
 	if (xsyms.live) {
+		uint64_t live_pa = kva_to_pa(xsyms.live);
+		dcache_inval_range(live_pa, 64);
 		out(" heartbeat ");
-		out_dec(*(volatile uint64_t *)kva_to_pa(xsyms.live + 8));
+		out_dec(*(volatile uint64_t *)(live_pa + 8));
 	}
 	out("\n");
 	show_panic_string(&xsyms);
 
 	uint64_t mb_va = 0;
 	if (xsyms.msgbufp) {
-		uint64_t dyn_mb = sanitize_kva(*(volatile uint64_t *)kva_to_pa(xsyms.msgbufp));
+		uint64_t mbp_pa = kva_to_pa(xsyms.msgbufp);
+		dcache_inval_range(mbp_pa, 64);
+		uint64_t dyn_mb = sanitize_kva(*(volatile uint64_t *)mbp_pa);
 		if (dyn_mb >= KERNEL_VIRT_BASE && dyn_mb < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
 			mb_va = dyn_mb;
 		}

@@ -819,11 +819,11 @@ print("[+] Installed Patch 47 at 0x804b24: _log_putc lock drop bypass -> nop")
 # 0x471bc4 (VA 0xfffffff007475bc4):
 # adrp x8, 0xfffffff007d77000 (0xd0004808)
 # str x0, [x8, #0x10] (0xf9000900)
-# dc cvac, x8 (0xd50b7a28) - hardware dcache flush to physical DRAM
 # dsb sy (0xd5033f9f) - data synchronization barrier
 # ret (0xd65f03c0) - guaranteed immediate return to caller
-struct.pack_into("<IIIII", kdata, 0x471bc4, 0xd0004808, 0xf9000900, 0xd50b7a28, 0xd5033f9f, 0xd65f03c0)
-print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record checkpoint, flush to DRAM, and ret")
+# nop (0xd503201f)
+struct.pack_into("<IIIII", kdata, 0x471bc4, 0xd0004808, 0xf9000900, 0xd5033f9f, 0xd65f03c0, 0xd503201f)
+print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record checkpoint, barrier, and ret (no dc cvac trap)")
 
 
 # Patch 49: dyld_kernel_fixups MH_FILESET assertion bypass at 0x452488 (VA 0xfffffff007456488)
@@ -842,6 +842,28 @@ print("[+] Installed Patch 50 at 0x452b9c: _arm_init dyld_kernel_fixups caller -
 # b.ne 0xfffffff0074574e8 -> nop
 struct.pack_into("<I", kdata, 0x452c48, 0xd503201f)
 print("[+] Installed Patch 51 at 0x452c48: chosen node failure panic bypass -> nop")
+
+# Patch 52: Neutralize ___stack_chk_guard mismatch panic at 0x45334c (VA 0xfffffff00745734c)
+# _arm_init starts with ___stack_chk_guard == 0, then re-randomizes canary at 0x7457320.
+# The epilogue check `cmp x9, x8; b.ne 0x7457584` (__stack_chk_fail) always panics!
+# NOPing b.ne ensures clean return from _arm_init.
+struct.pack_into("<I", kdata, 0x45334c, 0xd503201f) # nop (was b.ne 0xfffffff007457584)
+print("[+] Installed Patch 52 at 0x45334c: _arm_init stack canary mismatch panic bypass -> nop")
+
+# Patch 53: Neutralize _arm_init chosen node panic at 0x4532ac (VA 0xfffffff0074572ac)
+# b.ne 0xfffffff00745750c -> nop (prevents '%s: Unable to find 'chosen' DT node')
+struct.pack_into("<I", kdata, 0x4532ac, 0xd503201f)
+print("[+] Installed Patch 53 at 0x4532ac: chosen node lookup panic bypass -> nop")
+
+# Patch 54: Neutralize _arm_init dram-base panic at 0x4532cc (VA 0xfffffff0074572cc)
+# b.ne 0xfffffff007457534 -> nop (prevents 'Unable to find dram-base entry in chosen DT node')
+struct.pack_into("<I", kdata, 0x4532cc, 0xd503201f)
+print("[+] Installed Patch 54 at 0x4532cc: dram-base entry panic bypass -> nop")
+
+# Patch 55: Neutralize _arm_init dram-size panic at 0x4532ec (VA 0xfffffff0074572ec)
+# b.ne 0xfffffff00745755c -> nop (prevents dram-size entry panic)
+struct.pack_into("<I", kdata, 0x4532ec, 0xd503201f)
+print("[+] Installed Patch 55 at 0x4532ec: dram-size entry panic bypass -> nop")
 
 
 
