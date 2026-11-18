@@ -771,6 +771,17 @@ print("[+] Installed Patch 39 at 0x471b90: _loader_jump TCR_EL1 T0SZ=25 setup ->
 struct.pack_into("<Q", kdata, 0x252998, 0xfffffff007475178)
 print("[+] Installed Patch 40 at 0x252998: _PE_kputc -> _loader_log_putc (0xfffffff007475178)")
 
+# Patch 41: Unblock _kprintf logging to _PE_kputc
+# Apple production kernels set disable_serial_output = 1 (0x252990) and kprintf_disabled = 1 (0x252991),
+# and test them with tbnz instructions at 0xa4f6cc (0xfffffff007a536cc) and 0xa4f6d8 (0xfffffff007a536d8),
+# which silently drop all kernel console logs before _PE_kputc is called.
+# Clear both flag bytes to 0 and NOP out both tbnz checks so _kprintf unconditionally outputs all kernel messages!
+kdata[0x252990] = 0 # disable_serial_output = 0
+kdata[0x252991] = 0 # kprintf_disabled = 0
+struct.pack_into("<I", kdata, 0xa4f6cc, 0xd503201f) # nop (was tbnz w9, #0, 0xfffffff007a53778)
+struct.pack_into("<I", kdata, 0xa4f6d8, 0xd503201f) # nop (was tbnz w9, #0, 0xfffffff007a53778)
+print("[+] Installed Patch 41 at 0x252990, 0x252991, 0xa4f6cc, 0xa4f6d8: unblocked _kprintf console logging")
+
 
 
 with open(KERNEL_PATH, "wb") as f:

@@ -1404,9 +1404,15 @@ static void read_screen(void)
 
 static void rescue_state(void)
 {
-	uint64_t kp_pa = kva_to_pa(0xfffffff007b8f238ULL);
+	uint64_t kp_va = xsyms.kernel_pmap ? xsyms.kernel_pmap : 0xfffffff0071b83d0ULL;
+	uint64_t kp_pa = kva_to_pa(kp_va);
 	dcache_inval_range(kp_pa, 64);
-	s_kernel_ttep = *(volatile uint64_t *)(kp_pa + 8);
+	s_kernel_ttep = *(volatile uint64_t *)kp_pa;
+	if (s_kernel_ttep >= KERNEL_VIRT_BASE && s_kernel_ttep < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+		uint64_t pmap_pa = kva_to_pa(s_kernel_ttep);
+		dcache_inval_range(pmap_pa, 64);
+		s_kernel_ttep = *(volatile uint64_t *)pmap_pa;
+	}
 
 	if (xsyms.cpu_ttep) {
 		xnu_fp[3] = rd32(kva_to_pa(xsyms.cpu_ttep)) | (uint64_t)rd32(kva_to_pa(xsyms.cpu_ttep) + 4) << 32;
