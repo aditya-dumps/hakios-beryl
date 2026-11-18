@@ -809,6 +809,10 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_u32(&w, "display-height", 2400);
 	dt_prop_u32(&w, "touch-size-x", 17280);
 	dt_prop_u32(&w, "touch-size-y", 38400);
+	dt_prop_str(&w, "multi-touch-protocol", "type-b");
+	dt_prop_u32(&w, "touch-slots", 10);
+	dt_prop_u32(&w, "touch-resolution-x", 16);
+	dt_prop_u32(&w, "touch-resolution-y", 16);
 	static const uint32_t rst_gpio[3] = { 0x0c, 3, 1 };
 	dt_prop(&w, "focaltech,reset-gpio", rst_gpio, sizeof(rst_gpio));
 	static const uint32_t irq_gpio[3] = { 0x0c, 22, 2 };
@@ -1440,18 +1444,24 @@ static void read_screen(void)
 
 static void rescue_state(void)
 {
+	uint64_t lcp_pa = kva_to_pa(0xfffffff007d77010ULL);
+	dcache_inval_range(lcp_pa, 64);
+	uint32_t last_cp = rd32(lcp_pa);
+	out("last_checkpoint: 0x"); out_hex(last_cp); out(" (dec "); out_dec(last_cp); out(")\n");
+
 	uint64_t kp_va = xsyms.kernel_pmap ? xsyms.kernel_pmap : 0xfffffff0071b83d0ULL;
 	uint64_t kp_pa = kva_to_pa(kp_va);
 	dcache_inval_range(kp_pa, 64);
-	s_kernel_ttep = *(volatile uint64_t *)kp_pa;
+	s_kernel_ttep = sanitize_kva(*(volatile uint64_t *)kp_pa);
 	if (s_kernel_ttep >= KERNEL_VIRT_BASE && s_kernel_ttep < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
 		uint64_t pmap_pa = kva_to_pa(s_kernel_ttep);
 		dcache_inval_range(pmap_pa, 64);
-		s_kernel_ttep = *(volatile uint64_t *)pmap_pa;
+		s_kernel_ttep = sanitize_kva(*(volatile uint64_t *)pmap_pa);
 	}
 
 	if (xsyms.cpu_ttep) {
-		xnu_fp[3] = rd32(kva_to_pa(xsyms.cpu_ttep)) | (uint64_t)rd32(kva_to_pa(xsyms.cpu_ttep) + 4) << 32;
+		uint64_t raw_cpu = rd32(kva_to_pa(xsyms.cpu_ttep)) | (uint64_t)rd32(kva_to_pa(xsyms.cpu_ttep) + 4) << 32;
+		xnu_fp[3] = sanitize_kva(raw_cpu);
 		xnu_fp[2] = 0x22a51a251aULL;
 	}
 	if (!xnu_fp[3] && s_kernel_ttep) {
@@ -1469,7 +1479,16 @@ static void rescue_state(void)
 	out("\n");
 	show_panic_string(&xsyms);
 
-	uint64_t mb_va = xsyms.msgbuf ? xsyms.msgbuf : (xsyms.msgbufp ? xsyms.msgbufp - 0x18 : 0);
+	uint64_t mb_va = 0;
+	if (xsyms.msgbufp) {
+		uint64_t dyn_mb = sanitize_kva(*(volatile uint64_t *)kva_to_pa(xsyms.msgbufp));
+		if (dyn_mb >= KERNEL_VIRT_BASE && dyn_mb < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+			mb_va = dyn_mb;
+		}
+	}
+	if (!mb_va) {
+		mb_va = xsyms.msgbuf ? xsyms.msgbuf : (xsyms.msgbufp ? xsyms.msgbufp - 0x18 : 0);
+	}
 	if (!mb_va) {
 		mb_va = 0xfffffff007b17e00ULL;
 	}
@@ -2816,6 +2835,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	}
 	volatile uint32_t *llk = (volatile uint32_t *)kva_to_pa(0xfffffff007d77000ULL);
 	*llk = 0;
+	*(volatile uint64_t *)kva_to_pa(0xfffffff007d77010ULL) = 0;
 
 	/* Allow XNU video console output for on-screen visibility */
 	if (s.vcputc_options) {

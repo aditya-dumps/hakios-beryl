@@ -815,6 +815,15 @@ print("[+] Installed Patch 46 at 0x2d0528: _oslog_is_safe -> mov w0, #1; ret (un
 struct.pack_into("<I", kdata, 0x804b24, 0xd503201f)
 print("[+] Installed Patch 47 at 0x804b24: _log_putc lock drop bypass -> nop")
 
+# Patch 48: _loader_checkpoint write active checkpoint ID to _loader_stop_call (0xfffffff007d77010)
+# 0x471bc4 (VA 0xfffffff007475bc4):
+# adrp x8, 0xfffffff007d77000 (0xd0004808)
+# str x0, [x8, #0x10] (0xf9000900)
+# Writes the active checkpoint number into DRAM on every milestone in _arm_init and kernel bootstrap!
+struct.pack_into("<II", kdata, 0x471bc4, 0xd0004808, 0xf9000900)
+print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> adrp x8, 0xfffffff007d77000; str x0, [x8, #0x10]")
+
+
 
 
 with open(KERNEL_PATH, "wb") as f:
