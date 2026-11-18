@@ -787,6 +787,29 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_u32(&w, "boot-console", 1);
 	dt_end(&w);
 
+	dt_begin(&w, "i2c0");
+	dt_prop_str(&w, "device_type", "i2c");
+	dt_prop_str(&w, "compatible", "mediatek,mt6983-i2c");
+	uint64_t i2c_reg[2] = { 0x11ed0000ULL - 0x0c000000ULL, 0x1000 };
+	dt_prop(&w, "reg", i2c_reg, sizeof(i2c_reg));
+	dt_prop_u32(&w, "clock-frequency", 400000);
+	uint32_t i2c_intr[4] = { 0, 400, 4, 0 };
+	dt_prop(&w, "interrupts", i2c_intr, sizeof(i2c_intr));
+	dt_prop_u32(&w, "#address-cells", 1);
+	dt_prop_u32(&w, "#size-cells", 0);
+
+	dt_begin(&w, "touch");
+	dt_prop_str(&w, "device_type", "touch");
+	dt_prop_str(&w, "compatible", "focaltech,fts");
+	dt_prop_u32(&w, "reg", 0x38);
+	static const uint32_t coords[4] = { 0, 0, 17279, 38399 };
+	dt_prop(&w, "focaltech,display-coords", coords, sizeof(coords));
+	dt_prop_u32(&w, "focaltech,max-touch-number", 10);
+	dt_prop_str(&w, "status", "okay");
+	dt_end(&w); /* touch */
+
+	dt_end(&w); /* i2c0 */
+
 	dt_end(&w); /* arm-io */
 	dt_end(&w); /* device-tree */
 	return (uint32_t)(w.cur - w.base);
@@ -2707,10 +2730,24 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
+	if (s.uart_putc_options && s.log_putc) {
+		volatile uint32_t *upo = (volatile uint32_t *)kva_to_pa(s.uart_putc_options);
+		int64_t rel = (int64_t)(s.log_putc - s.uart_putc_options) >> 2;
+		if (rel >= -(1 << 25) && rel < (1 << 25)) {
+			upo[0] = 0x14000000u | ((uint32_t)rel & 0x03ffffffu);
+		}
+	}
+
 	if (s.pe_kputc && s.log_putc) {
 		volatile uint64_t *pk = (volatile uint64_t *)kva_to_pa(s.pe_kputc);
 		*pk = s.log_putc;
 		out("PE_kputc -> _loader_log_putc: hooked console logging\n");
+	}
+
+	if (s.log_putc) {
+		volatile uint64_t *cons_putc = (volatile uint64_t *)kva_to_pa(0xfffffff0071b7cb0ULL);
+		*cons_putc = s.log_putc;
+		out("cons_ops[0].putc -> _loader_log_putc: direct console hooked\n");
 	}
 
 	/* Allow XNU video console output for on-screen visibility */
@@ -2776,6 +2813,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 			slot[2] = XNU_CHECKPOINT;
 			slot[3] = XNU_SLIDE;
 			dcache_clean_range((uint64_t)slot, 64);
+			dcache_clean_range((uint64_t)xnu_return_stub, 512);
 			__asm__ volatile("dsb sy; isb");
 		}
 	}

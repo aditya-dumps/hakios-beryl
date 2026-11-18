@@ -782,6 +782,29 @@ struct.pack_into("<I", kdata, 0xa4f6cc, 0xd503201f) # nop (was tbnz w9, #0, 0xff
 struct.pack_into("<I", kdata, 0xa4f6d8, 0xd503201f) # nop (was tbnz w9, #0, 0xfffffff007a53778)
 print("[+] Installed Patch 41 at 0x252990, 0x252991, 0xa4f6cc, 0xa4f6d8: unblocked _kprintf console logging")
 
+# Patch 42: Hook _serial_putc_options at 0xa4f7ac (VA 0xfffffff007a537ac) -> b _loader_log_putc (0x17e88673)
+# In genuine XNU, _console_write_unbuffered calls cons_ops[0].putc which is _serial_putc_options.
+# Hooking it guarantees any character sent via cons_ops[0].putc lands directly in _loader_log!
+struct.pack_into("<I", kdata, 0xa4f7ac, 0x17e88673) # b 0xfffffff007475178
+print("[+] Installed Patch 42 at 0xa4f7ac: _serial_putc_options -> b _loader_log_putc (0xfffffff007475178)")
+
+# Patch 43: Hook _uart_putc_options at 0xa4fc44 (VA 0xfffffff007a53c44) -> b _loader_log_putc (0x17e8854d)
+# _serial_putc_options originally branched here, where cbz on the null serial dev discarded all output.
+# Hooking this guarantees that even direct calls to _uart_putc_options go to _loader_log!
+struct.pack_into("<I", kdata, 0xa4fc44, 0x17e8854d) # b 0xfffffff007475178
+print("[+] Installed Patch 43 at 0xa4fc44: _uart_putc_options -> b _loader_log_putc (0xfffffff007475178)")
+
+# Patch 44: NOP out _PE_init_kprintf's store to _PE_kputc at 0xad4f78 (VA 0xfffffff007ad8f78)
+# At boot, _PE_init_kprintf executes `str x8, [x9, #0x998]` which overwrote _PE_kputc with _console_write_unbuffered.
+# NOPing it ensures _PE_kputc permanently remains pointing to _loader_log_putc!
+struct.pack_into("<I", kdata, 0xad4f78, 0xd503201f) # nop (was str x8, [x9, #0x998])
+print("[+] Installed Patch 44 at 0xad4f78: _PE_init_kprintf preserve _PE_kputc (nop)")
+
+# Patch 45: Point const_cons_ops[0].putc at 0x1b3cb0 (VA 0xfffffff0071b7cb0) -> _loader_log_putc (0xfffffff007475178)
+# Direct table hook ensuring console operations index 0 always routes directly to DRAM ring buffer!
+struct.pack_into("<Q", kdata, 0x1b3cb0, 0xfffffff007475178)
+print("[+] Installed Patch 45 at 0x1b3cb0: cons_ops[0].putc -> _loader_log_putc (0xfffffff007475178)")
+
 
 
 with open(KERNEL_PATH, "wb") as f:
