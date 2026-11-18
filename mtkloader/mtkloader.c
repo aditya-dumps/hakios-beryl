@@ -805,6 +805,16 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	static const uint32_t coords[4] = { 0, 0, 17279, 38399 };
 	dt_prop(&w, "focaltech,display-coords", coords, sizeof(coords));
 	dt_prop_u32(&w, "focaltech,max-touch-number", 10);
+	dt_prop_u32(&w, "display-width", 1080);
+	dt_prop_u32(&w, "display-height", 2400);
+	dt_prop_u32(&w, "touch-size-x", 17280);
+	dt_prop_u32(&w, "touch-size-y", 38400);
+	static const uint32_t rst_gpio[3] = { 0x0c, 3, 1 };
+	dt_prop(&w, "focaltech,reset-gpio", rst_gpio, sizeof(rst_gpio));
+	static const uint32_t irq_gpio[3] = { 0x0c, 22, 2 };
+	dt_prop(&w, "focaltech,irq-gpio", irq_gpio, sizeof(irq_gpio));
+	uint32_t touch_intr[4] = { 0, 202, 1, 0 };
+	dt_prop(&w, "interrupts", touch_intr, sizeof(touch_intr));
 	dt_prop_str(&w, "status", "okay");
 	dt_end(&w); /* touch */
 
@@ -897,15 +907,18 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 	uint64_t ttbr = 0;
 	if (va >= 0xffff000000000000ULL) {
 		if (s_kernel_ttep) {
-			ttbr = XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL);
+			ttbr = (s_kernel_ttep & 0x0000ffffffffffffULL) & ~0x3fffULL;
+			if (ttbr < 0x40000000ULL) {
+				ttbr = XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL & ~0x3fffULL);
+			}
 		} else {
 			ttbr = kva_to_pa(0xfffffff0071ba000ULL);
 		}
 	} else {
-		ttbr = (xnu_fp[3] & 0x0000000fffffffffULL) & ~0xfffULL;
+		ttbr = (xnu_fp[3] & 0x0000ffffffffffffULL) & ~0x3fffULL;
 	}
 
-	if (!ttbr || ttbr < 0x40000000ULL || ttbr >= 0x240000000ULL) {
+	if (!ttbr || (ttbr & 7) || ttbr < 0x40000000ULL || ttbr >= 0x240000000ULL) {
 		return 0;
 	}
 
@@ -914,11 +927,11 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 		/* Level 0 table walk (bits 47:39) for 48-bit user address space */
 		uint32_t idx0 = (va >> 39) & 0x1ff;
 		uint64_t pte0_pa = ttbr + idx0 * 8;
-		if (pte0_pa >= 0x40000000ULL && pte0_pa < 0x240000000ULL) {
+		if ((pte0_pa & 7) == 0 && pte0_pa >= 0x40000000ULL && pte0_pa < 0x240000000ULL) {
 			dcache_inval_range(pte0_pa, 64);
 			uint64_t pte0 = *(volatile uint64_t *)pte0_pa;
 			if ((pte0 & 1) && (pte0 & 2)) {
-				uint64_t next_tbl = (pte0 & 0x0000000fffffffffULL) & ~0xfffULL;
+				uint64_t next_tbl = (pte0 & 0x0000000fffffffffULL) & ~0x3fffULL;
 				if (next_tbl >= 0x40000000ULL && next_tbl < 0x240000000ULL) {
 					l1_table = next_tbl;
 				}
@@ -929,7 +942,7 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 	uint32_t idx1 = (va >> 30) & 0x1ff;
 	uint64_t pte1_pa = l1_table + idx1 * 8;
 	uint64_t pte1 = 0;
-	if (pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
+	if ((pte1_pa & 7) == 0 && pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
 		dcache_inval_range(pte1_pa, 64);
 		pte1 = *(volatile uint64_t *)pte1_pa;
 	}
@@ -938,14 +951,14 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 		if (va >= 0xffff000000000000ULL) {
 			l1_table = kva_to_pa(0xfffffff0071ba000ULL) + 0x1000ULL;
 			pte1_pa = l1_table + idx1 * 8;
-			if (pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
+			if ((pte1_pa & 7) == 0 && pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
 				dcache_inval_range(pte1_pa, 64);
 				pte1 = *(volatile uint64_t *)pte1_pa;
 			}
 			if (!(pte1 & 1)) {
 				l1_table = kva_to_pa(0xfffffff0071ba000ULL);
 				pte1_pa = l1_table + idx1 * 8;
-				if (pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
+				if ((pte1_pa & 7) == 0 && pte1_pa >= 0x40000000ULL && pte1_pa < 0x240000000ULL) {
 					dcache_inval_range(pte1_pa, 64);
 					pte1 = *(volatile uint64_t *)pte1_pa;
 				}
@@ -1484,56 +1497,68 @@ static void rescue_state(void)
 	if (size == 0 || size > 256 * 1024) {
 		size = 131072;
 	}
-	uint64_t bufc_pa = xnu_va_to_pa(bufc);
-	if (!bufc_pa && bufc >= KERNEL_VIRT_BASE && bufc < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+	uint64_t bufc_pa = 0;
+	if (bufc >= KERNEL_VIRT_BASE && bufc < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
 		bufc_pa = kva_to_pa(bufc);
+	} else {
+		bufc_pa = xnu_va_to_pa(bufc);
 	}
 	if (!bufc_pa) {
 		bufc_pa = 0x83d2b77cULL;
 	}
 	out("bufc PA="); out_hex(bufc_pa); out("\n");
 	{
-		uint64_t tt = s_kernel_ttep ? (XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL)) : ((xnu_fp[3] & 0x0000000fffffffffULL) & ~0xfffULL);
+		uint64_t tt = 0;
+		if (xnu_fp[3] && (xnu_fp[3] & ~0x3fffULL)) {
+			tt = (xnu_fp[3] & 0x0000ffffffffffffULL) & ~0x3fffULL;
+		} else if (s_kernel_ttep) {
+			tt = (s_kernel_ttep & 0x0000ffffffffffffULL) & ~0x3fffULL;
+		}
+		if (tt && tt < 0x40000000ULL) {
+			tt = XNU_PHYS_BASE + (tt & 0x0fffffffULL & ~0x3fffULL);
+		}
 		out("bufc walk: va="); out_hex(bufc); out(" ttbr="); out_hex(tt);
 		uint64_t l1 = tt;
-		if (bufc < 0xffff000000000000ULL) {
+		if (l1 && (l1 & 7) == 0 && bufc < 0xffff000000000000ULL) {
 			uint32_t i0 = (bufc >> 39) & 0x1ff;
 			uint64_t p0 = tt + i0 * 8;
 			out(" p0_pa="); out_hex(p0);
-			if (p0 >= 0x40000000ULL && p0 < 0x240000000ULL) {
+			if ((p0 & 7) == 0 && p0 >= 0x40000000ULL && p0 < 0x240000000ULL) {
 				dcache_inval_range(p0, 64);
 				uint64_t e0 = *(volatile uint64_t *)p0;
 				out(" e0="); out_hex(e0);
 				if ((e0 & 3) == 3) {
-					l1 = (e0 & 0x0000000fffffffffULL) & ~0xfffULL;
+					l1 = (e0 & 0x0000000fffffffffULL) & ~0x3fffULL;
 				}
 			}
 		}
-		uint32_t i1 = (bufc >> 30) & 0x1ff;
-		uint64_t p1 = l1 + i1 * 8;
-		out(" p1_pa="); out_hex(p1);
-		if (p1 >= 0x40000000ULL && p1 < 0x240000000ULL) {
-			dcache_inval_range(p1, 64);
-			uint64_t e1 = *(volatile uint64_t *)p1;
-			out(" e1="); out_hex(e1);
-			if ((e1 & 3) == 3) {
-				uint64_t l2 = (e1 & 0x0000000fffffffffULL) & ~0xfffULL;
-				uint32_t i2 = (bufc >> 21) & 0x1ff;
-				uint64_t p2 = l2 + i2 * 8;
-				out(" p2_pa="); out_hex(p2);
-				if (p2 >= 0x40000000ULL && p2 < 0x240000000ULL) {
-					dcache_inval_range(p2, 64);
-					uint64_t e2 = *(volatile uint64_t *)p2;
-					out(" e2="); out_hex(e2);
-					if ((e2 & 3) == 3) {
-						uint64_t l3 = (e2 & 0x0000000fffffffffULL) & ~0xfffULL;
-						uint32_t i3 = (bufc >> 12) & 0x1ff;
-						uint64_t p3 = l3 + i3 * 8;
-						out(" p3_pa="); out_hex(p3);
-						if (p3 >= 0x40000000ULL && p3 < 0x240000000ULL) {
-							dcache_inval_range(p3, 64);
-							uint64_t e3 = *(volatile uint64_t *)p3;
-							out(" e3="); out_hex(e3);
+		if (l1 && (l1 & 7) == 0) {
+			uint32_t i1 = (bufc >> 30) & 0x1ff;
+			uint64_t p1 = l1 + i1 * 8;
+			out(" p1_pa="); out_hex(p1);
+			if ((p1 & 7) == 0 && p1 >= 0x40000000ULL && p1 < 0x240000000ULL) {
+				dcache_inval_range(p1, 64);
+				uint64_t e1 = *(volatile uint64_t *)p1;
+				out(" e1="); out_hex(e1);
+				if ((e1 & 3) == 3) {
+					uint64_t l2 = (e1 & 0x0000000fffffffffULL) & ~0x3fffULL;
+					uint32_t i2 = (bufc >> 21) & 0x1ff;
+					uint64_t p2 = l2 + i2 * 8;
+					out(" p2_pa="); out_hex(p2);
+					if ((p2 & 7) == 0 && p2 >= 0x40000000ULL && p2 < 0x240000000ULL) {
+						dcache_inval_range(p2, 64);
+						uint64_t e2 = *(volatile uint64_t *)p2;
+						out(" e2="); out_hex(e2);
+						if ((e2 & 3) == 3) {
+							uint64_t l3 = (e2 & 0x0000000fffffffffULL) & ~0x3fffULL;
+							uint32_t i3 = (bufc >> 12) & 0x1ff;
+							uint64_t p3 = l3 + i3 * 8;
+							out(" p3_pa="); out_hex(p3);
+							if ((p3 & 7) == 0 && p3 >= 0x40000000ULL && p3 < 0x240000000ULL) {
+								dcache_inval_range(p3, 64);
+								uint64_t e3 = *(volatile uint64_t *)p3;
+								out(" e3="); out_hex(e3);
+							}
 						}
 					}
 				}
@@ -1547,6 +1572,18 @@ static void rescue_state(void)
 
 	uint32_t count = (bufx <= size) ? bufx : size;
 	uint32_t start = (bufx <= size) ? 0 : (bufx % size);
+	if (count == 0 && bufc_pa >= 0x40000000ULL && bufc_pa < 0x240000000ULL) {
+		dcache_inval_range(bufc_pa, 4096);
+		const volatile char *p = (const volatile char *)bufc_pa;
+		int pr = 0;
+		for (int i = 0; i < 256; i++) {
+			if (p[i] >= 32 && p[i] <= 126) pr++;
+		}
+		if (pr > 5) {
+			count = (size < 65536) ? size : 65536;
+			start = 0;
+		}
+	}
 	uint64_t cur_page_va = 0;
 	uint64_t cur_page_pa = 0;
 
@@ -1570,6 +1607,24 @@ static void rescue_state(void)
 	}
 	fbc.base = fbsave;
 	dbg_puts("\n--- end of message buffer ---\n");
+
+	/* Also rescue _oslog_boot_buf if present */
+	uint64_t oslog_pa = kva_to_pa(0xfffffff007b16df8ULL);
+	dcache_inval_range(oslog_pa, 4096);
+	const volatile char *op = (const volatile char *)oslog_pa;
+	int os_pr = 0;
+	for (int i = 0; i < 512; i++) {
+		if (op[i] >= 32 && op[i] <= 126) os_pr++;
+	}
+	if (os_pr > 5) {
+		out("--- oslog boot buffer (from DRAM) ---\n");
+		for (int i = 0; i < 2048; i++) {
+			char c = op[i];
+			if (c >= 32 && c <= 126) dbg_putc(c);
+			else if (c == '\n' || c == '\t' || c == '\r') dbg_putc(c);
+		}
+		dbg_puts("\n--- end of oslog boot buffer ---\n");
+	}
 }
 
 static void rescue_log(void)
@@ -2749,6 +2804,18 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		*cons_putc = s.log_putc;
 		out("cons_ops[0].putc -> _loader_log_putc: direct console hooked\n");
 	}
+
+	if (s.log_len) {
+		*(volatile uint32_t *)kva_to_pa(s.log_len) = 0;
+	}
+	if (s.log_ring_at) {
+		*(volatile uint32_t *)kva_to_pa(s.log_ring_at) = 0;
+	}
+	if (s.log_wrapped) {
+		*(volatile uint8_t *)kva_to_pa(s.log_wrapped) = 0;
+	}
+	volatile uint32_t *llk = (volatile uint32_t *)kva_to_pa(0xfffffff007d77000ULL);
+	*llk = 0;
 
 	/* Allow XNU video console output for on-screen visibility */
 	if (s.vcputc_options) {

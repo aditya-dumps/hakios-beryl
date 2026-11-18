@@ -805,6 +805,16 @@ print("[+] Installed Patch 44 at 0xad4f78: _PE_init_kprintf preserve _PE_kputc (
 struct.pack_into("<Q", kdata, 0x1b3cb0, 0xfffffff007475178)
 print("[+] Installed Patch 45 at 0x1b3cb0: cons_ops[0].putc -> _loader_log_putc (0xfffffff007475178)")
 
+# Patch 46: Force _oslog_is_safe (VA 0xfffffff0072d4528, file offset 0x2d0528) -> mov w0, #1; ret
+# Guarantees that _log_putc never drops characters into _oslog_msgbuf_dropped_charcount
+struct.pack_into("<II", kdata, 0x2d0528, 0x52800020, 0xd65f03c0)
+print("[+] Installed Patch 46 at 0x2d0528: _oslog_is_safe -> mov w0, #1; ret (unblocking all _log_putc calls)")
+
+# Patch 47: Neutralize _log_putc lock drop at 0x804b24 (VA 0xfffffff007808b24): tbz w0, #0 -> nop
+# Prevents dropped character emission during lock contention
+struct.pack_into("<I", kdata, 0x804b24, 0xd503201f)
+print("[+] Installed Patch 47 at 0x804b24: _log_putc lock drop bypass -> nop")
+
 
 
 with open(KERNEL_PATH, "wb") as f:
