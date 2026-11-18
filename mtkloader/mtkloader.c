@@ -2785,7 +2785,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x144 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=85 auto_reboot=85";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=80 auto_reboot=85";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2793,7 +2793,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	} else {
 		/* Automated test: full userland boot with 85s watchdog hardware warm reset */
 		verify_apfs_container();
-		const char *args = "debug=0x144 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 hv_wdt_pet=1 loader_return_after=85 auto_reboot=85";
+		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=80 auto_reboot=85";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -2863,11 +2863,6 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	static const char default_inject[] = "/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU;/redwood/lib/libredwood-sb.dylib SpringBoard;/redwood/lib/libredwood-media.dylib mediaserverd;/redwood/lib/libredwood-app.dylib Sileo;/redwood/lib/libredwood-tweaks.dylib Preferences";
 	memcpy((void *)inject_conf_pa, default_inject, sizeof(default_inject));
 	dcache_clean_range(inject_conf_pa, sizeof(default_inject));
-
-	/* Pre-hook _PE_halt_restart to toprgu_warm_reset (0xfffffff007462810) */
-	uint64_t pe_halt_pa = kva_to_pa(0xfffffff007d4dac0ULL);
-	*(volatile uint64_t *)pe_halt_pa = 0xfffffff007462810ULL;
-	dcache_clean_range(pe_halt_pa, 8);
 
 	/* Ensure AMOLED display composition mutex is running */
 	wr32(DISP_MUTEX_EN, 1);
