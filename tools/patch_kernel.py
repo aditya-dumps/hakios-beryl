@@ -821,8 +821,10 @@ print("[+] Installed Patch 47 at 0x804b24: _log_putc lock drop bypass -> nop")
 # str x0, [x8, #0x10] (0xf9000900)
 # dc cvac, x8 (0xd50b7a28) - hardware dcache flush to physical DRAM
 # dsb sy (0xd5033f9f) - data synchronization barrier
-struct.pack_into("<IIII", kdata, 0x471bc4, 0xd0004808, 0xf9000900, 0xd50b7a28, 0xd5033f9f)
-print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record checkpoint and flush to DRAM")
+# ret (0xd65f03c0) - guaranteed immediate return to caller
+struct.pack_into("<IIIII", kdata, 0x471bc4, 0xd0004808, 0xf9000900, 0xd50b7a28, 0xd5033f9f, 0xd65f03c0)
+print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record checkpoint, flush to DRAM, and ret")
+
 
 # Patch 49: dyld_kernel_fixups MH_FILESET assertion bypass at 0x452488 (VA 0xfffffff007456488)
 # In genuine iOS, kernels are prelinked MH_FILESETs. On standalone mach-o, kc_mh->filetype != MH_FILESET,

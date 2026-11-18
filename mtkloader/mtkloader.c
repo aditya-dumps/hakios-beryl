@@ -888,15 +888,18 @@ void loader_fault(uint64_t vec, uint64_t esr, uint64_t elr, uint64_t far)
 
 static inline uint64_t sanitize_kva(uint64_t va)
 {
-	/* Strip PAC tag bits if set: valid KVA has upper bits set */
+	/* Strip PAC tag bits: in XNU, kernel VAs reside in 0xfffffff000000000..0xfffffff0ffffffff */
+	if ((va & 0x0000000f00000000ULL) == 0x0000000700000000ULL ||
+	    (va & 0x0000000f00000000ULL) == 0x0000000800000000ULL ||
+	    (va & 0x0000000f00000000ULL) == 0x0000000400000000ULL) {
+		return 0xfffffff000000000ULL | (va & 0x0ffffffffULL);
+	}
 	if ((va >> 48) == 0xffff || (va >> 48) == 0x0000) {
 		return va | 0xffff000000000000ULL;
 	}
-	if ((va & 0x000000f000000000ULL) == 0x000000f000000000ULL) {
-		return 0xfffffff000000000ULL | (va & 0xffffffffffULL);
-	}
-	return va;
+	return (va & 0x0000ffffffffffffULL) | 0xffff000000000000ULL;
 }
+
 
 static uint64_t s_kernel_ttep = 0;
 
@@ -1447,7 +1450,8 @@ static void rescue_state(void)
 	uint64_t lcp_pa = kva_to_pa(0xfffffff007d77010ULL);
 	dcache_inval_range(lcp_pa, 64);
 	uint32_t last_cp = rd32(lcp_pa);
-	out("last_checkpoint: 0x"); out_hex(last_cp); out(" (dec "); out_dec(last_cp); out(")\n");
+	out("last_checkpoint: "); out_hex(last_cp); out(" (dec "); out_dec(last_cp); out(")\n");
+
 
 	uint64_t kp_va = xsyms.kernel_pmap ? xsyms.kernel_pmap : 0xfffffff0071b83d0ULL;
 	uint64_t kp_pa = kva_to_pa(kp_va);
@@ -2836,6 +2840,8 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	volatile uint32_t *llk = (volatile uint32_t *)kva_to_pa(0xfffffff007d77000ULL);
 	*llk = 0;
 	*(volatile uint64_t *)kva_to_pa(0xfffffff007d77010ULL) = 0;
+	dcache_clean_range(kva_to_pa(0xfffffff007d77000ULL), 64);
+
 
 	/* Allow XNU video console output for on-screen visibility */
 	if (s.vcputc_options) {
