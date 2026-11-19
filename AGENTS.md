@@ -31,3 +31,18 @@ Guidelines and invariants for AI agents working on booting genuine Apple iOS 16.
 
 7. **Ramoops & PStore Log Recovery**:
    - When Android boots after an iOS run, always inspect `/data/debuglogger/console-ramoops-0` and `/data/mqsas/temp/pstore/` in addition to `/sys/fs/pstore/`, as Xiaomi MIUI/HyperOS daemon sweeps ramoops into these vendor directories.
+
+8. **Zero Fake UI / Pure Authentic Execution**:
+   - Never introduce fake interactive C event loops, animated timer mockups, or synthetic UI canvases in `mtkloader`.
+   - All graphical frames rendered on the display panel must come exclusively from genuine Apple IPSW binaries (`backboardd`, `SpringBoard`, `Preferences`) and Darwin kernel framebuffer.
+
+9. **AMOLED Display Alpha Control**:
+   - On MediaTek MT6855 (`beryl`), LK initializes OVL0 Layer 0 (`0x14002000 + 0x030`) with bit 8 set, enabling per-pixel alpha.
+   - Always clear bit 8 via `display_alpha_off()` and re-arm `DISP_MUTEX_RUN` (`0x14001024`) so 24-bit RGB framebuffers (alpha 0) are opaque and rendered on the AMOLED display.
+
+10. **Early Single-Core Rendezvous Stability**:
+    - During early bring-up, pin kernel boot arguments to `cpus=1` and define `XNU_CORES 1` to prevent multi-core PSCI CPU_ON synchronization deadlocks on secondary Cortex cores before userland initializes.
+
+11. **UFS Hardware Native DMA Mapping (No Mailbox Deadlocks)**:
+    - Never allow `redwood_ufs.c` to wait on `ufs_read_mailbox` when running single-core without a dedicated hypervisor core on Core 0.
+    - Always use direct hardware LUN mapping (`ufshc_set_luns(4)` for LUN 2) and patch `_ufs_request` to return `EIO` immediately rather than spinning in an infinite mailbox wait loop.

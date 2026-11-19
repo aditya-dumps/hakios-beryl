@@ -15,21 +15,18 @@ Patch genuine Apple iOS 16.5 launchd.ios binary:
 """
 import struct
 import os
+import sys
 
 LAUNCHD_PATHS = [
+    "/home/aditya/beryl/hakios/userland/root/sbin/launchd.ios",
+    "/home/aditya/beryl/hakios/userland/sysroot/sbin/launchd.ios",
+    "root/sbin/launchd.ios",
+    "sysroot/sbin/launchd.ios",
     "hakios/userland/root/sbin/launchd.ios",
     "hakios/userland/sysroot/sbin/launchd.ios"
 ]
 
-REPLACEMENTS = [
-    (b'<string>/System/Library/LaunchDaemons</string>', b'<string>/redwood/LaunchDaemons///////</string>'),
-    (b'<string>/System/Library/LaunchAngels</string>', b'<string>/redwood/empty//////////////</string>'),
-    (b'<string>/System/Library/NanoLaunchDaemons</string>', b'<string>/redwood/empty///////////////////</string>'),
-    (b'<string>/AppleInternal/Library/LaunchDaemons</string>', b'<string>/redwood/empty//////////////////////</string>'),
-    (b'<string>/AppleInternal/Library/LaunchAngels</string>', b'<string>/redwood/empty/////////////////////</string>'),
-    (b'<string>/System/Library/NanoLaunchDaemonsAltAccount</string>', b'<string>/redwood/empty/////////////////////////////</string>'),
-    (b'<string>/System/Library/DeveloperModeLaunchDaemons</string>', b'<string>/redwood/empty////////////////////////////</string>')
-]
+REPLACEMENTS = []
 
 def patch_file(path):
     if not os.path.exists(path):
@@ -143,5 +140,10 @@ def patch_file(path):
     with open(path, "wb") as f:
         f.write(data)
 
-for p in LAUNCHD_PATHS:
-    patch_file(p)
+targets = sys.argv[1:] if len(sys.argv) > 1 else LAUNCHD_PATHS
+seen = set()
+for p in targets:
+    abs_p = os.path.abspath(p)
+    if abs_p not in seen and os.path.exists(p):
+        seen.add(abs_p)
+        patch_file(p)

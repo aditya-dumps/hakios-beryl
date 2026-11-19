@@ -805,6 +805,15 @@ print("[+] Installed Patch 44 at 0xad4f78: _PE_init_kprintf preserve _PE_kputc (
 struct.pack_into("<Q", kdata, 0x1b3cb0, 0xfffffff007475178)
 print("[+] Installed Patch 45 at 0x1b3cb0: cons_ops[0].putc -> _loader_log_putc (0xfffffff007475178)")
 
+# Patch 45b: Point const_cons_ops[1].putc at 0x1b3cc0 (VA 0xfffffff0071b7cc0) -> _loader_log_putc (0xfffffff007475178)
+# Ensures that even when video console is active, all kprintf/printf calls route directly to DRAM ring buffer!
+struct.pack_into("<Q", kdata, 0x1b3cc0, 0xfffffff007475178)
+print("[+] Installed Patch 45b at 0x1b3cc0: cons_ops[1].putc -> _loader_log_putc (0xfffffff007475178)")
+
+# Patch 45c: Neutralize _switch_to_video_console at 0x4238e0 (VA 0xfffffff0074278e0): mov w0, #0; ret
+struct.pack_into("<II", kdata, 0x4238e0, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 45c at 0x4238e0: _switch_to_video_console -> mov w0, #0; ret (cons_ops_index kept at 0)")
+
 # Patch 46: Force _oslog_is_safe (VA 0xfffffff0072d4528, file offset 0x2d0528) -> mov w0, #1; ret
 # Guarantees that _log_putc never drops characters into _oslog_msgbuf_dropped_charcount
 struct.pack_into("<II", kdata, 0x2d0528, 0x52800020, 0xd65f03c0)
@@ -815,15 +824,17 @@ print("[+] Installed Patch 46 at 0x2d0528: _oslog_is_safe -> mov w0, #1; ret (un
 struct.pack_into("<I", kdata, 0x804b24, 0xd503201f)
 print("[+] Installed Patch 47 at 0x804b24: _log_putc lock drop bypass -> nop")
 
-# Patch 48: _loader_checkpoint write active checkpoint ID to _loader_stop_call (0xfffffff007d77010)
+# Patch 48: _loader_checkpoint write active checkpoint ID to msgbuf.bufr (0xfffffff007b17e0c in __DATA,__data)
+# and _loader_stop_call (0xfffffff007d77010 in __DATA,__bss)
 # 0x471bc4 (VA 0xfffffff007475bc4):
-# adrp x8, 0xfffffff007d77000 (0xd0004808)
-# str x0, [x8, #0x10] (0xf9000900)
-# dsb sy (0xd5033f9f) - data synchronization barrier
-# ret (0xd65f03c0) - guaranteed immediate return to caller
-# nop (0xd503201f)
-struct.pack_into("<IIIII", kdata, 0x471bc4, 0xd0004808, 0xf9000900, 0xd5033f9f, 0xd65f03c0, 0xd503201f)
-print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record checkpoint, barrier, and ret (no dc cvac trap)")
+# adrp x8, 0xfffffff007b17000 (0xd0003508)
+# str w0, [x8, #0xe0c]        (0xb90e0d00) -> msgbuf.bufr (survives BSS clearing!)
+# adrp x9, 0xfffffff007d77000 (0xd0004809)
+# str x0, [x9, #0x10]         (0xf9000920) -> _loader_stop_call
+# dsb sy                      (0xd5033f9f) - data synchronization barrier
+# ret                         (0xd65f03c0) - guaranteed immediate return to caller
+struct.pack_into("<IIIIII", kdata, 0x471bc4, 0xd0003508, 0xb90e0d00, 0xd0004809, 0xf9000920, 0xd5033f9f, 0xd65f03c0)
+print("[+] Installed Patch 48 at 0x471bc4: _loader_checkpoint -> record to msgbuf.bufr + _loader_stop_call, barrier, and ret")
 
 
 # Patch 49: dyld_kernel_fixups MH_FILESET assertion bypass at 0x452488 (VA 0xfffffff007456488)
@@ -860,10 +871,255 @@ print("[+] Installed Patch 53 at 0x4532ac: chosen node lookup panic bypass -> no
 struct.pack_into("<I", kdata, 0x4532cc, 0xd503201f)
 print("[+] Installed Patch 54 at 0x4532cc: dram-base entry panic bypass -> nop")
 
-# Patch 55: Neutralize _arm_init dram-size panic at 0x4532ec (VA 0xfffffff0074572ec)
+# Patch 55: Neutralize _arm_init dram-size panic at 0x4522ec (VA 0xfffffff0074572ec)
 # b.ne 0xfffffff00745755c -> nop (prevents dram-size entry panic)
 struct.pack_into("<I", kdata, 0x4532ec, 0xd503201f)
 print("[+] Installed Patch 55 at 0x4532ec: dram-size entry panic bypass -> nop")
+
+# Patch 56: ml_static_ptovirt DRAM fallback at 0x4538c0 (VA 0xfffffff0074578c0)
+# Translates physical DRAM addresses (pa >= 0x80000000) directly to KERNEL_VIRT_BASE
+# ensuring RAMDisk (rd_pa) has a valid kernel virtual address mapping for mdevadd.
+# 0x4538c0:
+# mov x8, #0x80000000      (0xd2b00008)
+# cmp x0, x8               (0xeb08001f)
+# b.lo 0x1c                (0x540000e3)
+# sub x0, x0, x8           (0xcb080000)
+# mov x8, #0x7000000       (0xd2a0e008)
+# movk x8, #0xfff0, lsl 32 (0xf2dffe08)
+# movk x8, #0xffff, lsl 48 (0xf2ffffe8)
+# add x0, x0, x8           (0x8b080000)
+# ret                      (0xd65f03c0)
+# mov x0, #0               (0xd2800000)
+# ret                      (0xd65f03c0)
+struct.pack_into("<IIIIIIIIIII", kdata, 0x4538c0,
+    0xd2b00008, 0xeb08001f, 0x540000e3, 0xcb080000,
+    0xd2a0e008, 0xf2dffe08, 0xf2ffffe8, 0x8b080000,
+    0xd65f03c0, 0xd2800000, 0xd65f03c0)
+print("[+] Installed Patch 56 at 0x4538c0: ml_static_ptovirt DRAM fallback translation -> KVA")
+
+# Patch 57: _mdevlookup fallback for md0 at 0x4be200 (VA 0xfffffff0074c2200)
+# Instead of returning -1 (NODEV) when mdev[0] is uninitialized, return 0x01000000 (makedev(1, 0) = md0).
+# mov w0, #0x01000000 (0x52a02000)
+struct.pack_into("<I", kdata, 0x4be200, 0x52a02000)
+print("[+] Installed Patch 57 at 0x4be200: _mdevlookup default md0 dev_t (0x01000000)")
+
+# Patch 58: _IOFindBSDRoot md0 error branch neutralization at 0xa28450 (VA 0xfffffff007a2c450)
+# Neutralizes `tbnz w0, #0x1f, #0xfffffff007a2c9fc` -> nop
+# Guarantees md0 is registered as root device and IOFindBSDRoot returns 0 (success).
+struct.pack_into("<I", kdata, 0xa28450, 0xd503201f)
+print("[+] Installed Patch 58 at 0xa28450: _IOFindBSDRoot md0 error branch -> nop")
+
+# Patch 58b: Restore genuine IOFindBSDRoot mountroot handler at 0xa28878 (VA 0xfffffff007a2c878)
+# In HakIOS architecture, initial root is md0 (ramdisk containing /sbin/launchd).
+# 0xa28878: adr x28, #0xfffffff007b20c30 (0x107a1ddc)
+# 0xa2887c: nop                          (0xd503201f)
+# 0xa28880: b #0xfffffff007a2c79c        (0x17ffffc7)
+struct.pack_into("<III", kdata, 0xa28878, 0x107a1ddc, 0xd503201f, 0x17ffffc7)
+print("[+] Restored genuine IOFindBSDRoot mountroot handler at 0xa28878 (md0 ramdisk root enabled)")
+
+# Patch 59: _bsd_init vfs_mountroot infinite retry sleep loop neutralization
+# 0x790e84 (VA 0xfffffff007794e84): cbz w0 -> b 0x7794eac (0x1400000a)
+# 0x790e98 (VA 0xfffffff007794e98): b.eq 0x7794f38 ("We are hanging here...") -> b 0x7794eac (0x14000005)
+# Guarantees that execution immediately proceeds to PID 1 initialization without hanging in the sleep loop.
+struct.pack_into("<I", kdata, 0x790e84, 0x1400000a)
+struct.pack_into("<I", kdata, 0x790e98, 0x14000005)
+print("[+] Installed Patch 59 at 0x790e84 & 0x790e98: _bsd_init mount retry loop neutralized -> b 0x7794eac")
+
+# Patch 59b: Restore genuine cbnz w0, 0x7795248 at 0x790ef8 (VA 0xfffffff007794ef8)
+# Preserves valid rootvnode check to prevent NULL pointer dereference crash at 0x7794fb0
+struct.pack_into("<I", kdata, 0x790ef8, 0x35001a80)
+print("[+] Restored genuine _bsd_init rootvnode validation at 0x790ef8")
+
+# Patch 60: _mdevadd devfs_make_node failure bypass at 0x4be0b0 (VA 0xfffffff0074c20b0)
+# Neutralizes `cbz x0, #0xfffffff0074c213c` -> nop
+# Ensures md0 ramdisk device registration proceeds even before devfs_kernel_mount.
+struct.pack_into("<I", kdata, 0x4be0b0, 0xd503201f)
+print("[+] Installed Patch 60 at 0x4be0b0: _mdevadd devfs_make_node bypass -> nop")
+
+# Patch 61: _mdevadd raw device devfs_make_node failure bypass at 0x4be0ec (VA 0xfffffff0074c20ec)
+# Neutralizes `cbz x0, #0xfffffff0074c2148` -> nop
+struct.pack_into("<I", kdata, 0x4be0ec, 0xd503201f)
+print("[+] Installed Patch 61 at 0x4be0ec: _mdevadd raw node bypass -> nop")
+
+# Patch 62: _mdevstrategy active check bypass at 0x4be5a4 (VA 0xfffffff0074c25a4)
+# Neutralizes `tbnz w8, #0, #0xfffffff0074c25d4` -> unconditional `b #0xfffffff0074c25d4` (0x1400000c)
+# Ensures all buffer reads to md0 ramdisk proceed immediately without ENXIO error.
+struct.pack_into("<I", kdata, 0x4be5a4, 0x1400000c)
+print("[+] Installed Patch 62 at 0x4be5a4: _mdevstrategy active check -> b 0x74c25d4")
+
+# Patch 63: _focaltech_wait_valid FT3519T chip ID validation at 0x4c3770 & 0x4c377c
+# Neutralizes FT3680 chip ID checks (0x56 0x62) so FT3519T (0x54 0x52) is immediately recognized as valid.
+struct.pack_into("<I", kdata, 0x4c3770, 0xd503201f)
+struct.pack_into("<I", kdata, 0x4c377c, 0xd503201f)
+print("[+] Installed Patch 63 at 0x4c3770 & 0x4c377c: _focaltech_wait_valid FT3519T ID bypass -> nop")
+
+# Patch 64: _chip_probe FT3519T boot ID validation at 0x4c2ef4 & 0x4c2efc
+# Neutralizes boot ID comparison (0x56 0x62) so FT3519T attaches and creates /dev/redwood-touch.
+struct.pack_into("<I", kdata, 0x4c2ef4, 0xd503201f)
+struct.pack_into("<I", kdata, 0x4c2efc, 0xd503201f)
+print("[+] Installed Patch 64 at 0x4c2ef4 & 0x4c2efc: _chip_probe FT3519T boot ID bypass -> nop")
+
+# Patch 65: Neutralize kernel execve data abort panic at 0x353ed0 (VA 0xfffffff007357ed0)
+# Disassembly at 0x353edc was `ldr x19, [x0, #0x420]` where x0 == NULL on launchd.ios execve,
+# causing `panic: Kernel data abort. at pc 0xfffffff007357edc, lr 0xfffffff0077e091c (far: 0x420)`.
+# Replace with `mov x0, #0; ret` (0x52800000, 0xd65f03c0) to safely bypass the NULL hook.
+struct.pack_into("<II", kdata, 0x353ed0, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 65 at 0x353ed0: execve NULL hook data abort bypass -> mov x0, #0; ret")
+
+# Patch 66: Neutralize _ufs_request Mailbox Spinlock Deadlock at 0x4c7dd8 (VA 0xfffffff0074cbdd8)
+# In single-core boot (cpus=1), no hypervisor remains on Core 0 to serve mailbox requests.
+# Replace _ufs_request with `mov w0, #5; ret` (EIO) so mailbox attempts never hang.
+struct.pack_into("<II", kdata, 0x4c7dd8, 0x528000a0, 0xd65f03c0)
+print("[+] Installed Patch 66 at 0x4c7dd8: _ufs_request spinlock bypass -> mov w0, #5; ret")
+
+# Patch 67: Hardware Native UFS Fast-Mapping in _ufs_native_map at 0x4c626c (VA 0xfffffff0074ca26c)
+# Replaces slow/deadlocked mailbox GPT probe with direct hardware LUN mapping and transfer list arming.
+patch67_instrs = [
+    0xd100c3ff, # sub sp, sp, #0x30
+    0xa9027bfd, # stp x29, x30, [sp, #0x20]
+    0xa90153f3, # stp x19, x20, [sp, #0x10]
+    0xa9005bf5, # stp x21, x22, [sp]
+    0x910003fd, # mov x29, sp
+    0x52801fe0, # mov w0, #0xff
+    0x940011bb, # bl ufshc_set_luns (0xfffffff0074ce970)
+    0x52800000, # mov w0, #0
+    0x94000e7d, # bl ufshc_switch_in (0xfffffff0074cdc80)
+    0xb0004e08, # adrp x8, 0xfffffff007e8b000
+    0xf9453513, # ldr x19, [x8, #0xa68] (ufs_page)
+    0xb94aa114, # ldr w20, [x8, #0xaa0] (ufs_parts)
+    0x34000214, # cbz w20, done
+    0x91060275, # add x21, x19, #0x180 (part[0])
+    0xb0004e0a, # adrp x10, 0xfffffff007e8b000
+    0x9134d14a, # add x10, x10, #0xd34 (ufs_lun)
+    0xb0004e0b, # adrp x11, 0xfffffff007e8b000
+    0x9137a16b, # add x11, x11, #0xde8 (ufs_lun_offset)
+    0x52800016, # mov w22, #0 (i = 0)
+    # loop:
+    0x794072ac, # ldrh w12, [x21, #0x38] (unit)
+    0x3836494c, # strb w12, [x10, w22, uxtw] (ufs_lun[i] = unit)
+    0xf9401aad, # ldr x13, [x21, #0x30] (start_lba)
+    0xd374cdad, # lsl x13, x13, #12 (offset = start_lba * 4096)
+    0xf836596d, # str x13, [x11, w22, uxtw #3] (ufs_lun_offset[i] = offset)
+    0x910102b5, # add x21, x21, #0x40 (next part)
+    0x110006d6, # add w22, w22, #1 (i++)
+    0x6b1402df, # cmp w22, w20
+    0x54ffff03, # b.lo loop
+    # done:
+    0xb0004e08, # adrp x8, 0xfffffff007e8b000
+    0x52800029, # mov w9, #1
+    0x39375109, # strb w9, [x8, #0xdd4] (ufs_native_mapped = 1)
+    0x39375509, # strb w9, [x8, #0xdd5] (ufs_native_on = 1)
+    0x52800020, # mov w0, #1 (return 1)
+    0xa9405bf5, # ldp x21, x22, [sp]
+    0xa94153f3, # ldp x19, x20, [sp, #0x10]
+    0xa9427bfd, # ldp x29, x30, [sp, #0x20]
+    0x9100c3ff, # add sp, sp, #0x30
+    0xd65f03c0  # ret
+]
+for idx, ins in enumerate(patch67_instrs):
+    struct.pack_into("<I", kdata, 0x4c626c + idx * 4, ins)
+print(f"[+] Installed Patch 67 at 0x4c626c: _ufs_native_map fast hardware mapping ({len(patch67_instrs)*4} bytes)")
+
+# Patch 67b: Guarantee _ufs_native_init unconditionally executes _ufs_native_map at 0x4c6044 (VA 0xfffffff0074ca044)
+# (was tbz w0, #0, 0x74ca098 -> nop)
+struct.pack_into("<I", kdata, 0x4c6044, 0xd503201f)
+print("[+] Installed Patch 67b at 0x4c6044: _ufs_native_init unconditional mapping bypass -> nop")
+
+# Patch 68: Neutralize _redwood_goodix_init at 0x4c0c68 (VA 0xfffffff0074c4c68)
+# Prevents goodix_thread from accessing non-existent Qualcomm TLMM/GCC/SE/RSC registers on MediaTek silicon
+struct.pack_into("<II", kdata, 0x4c0c68, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 68 at 0x4c0c68: _redwood_goodix_init -> mov w0, #0; ret")
+
+# Patch 69: Neutralize _redwood_tcm_init at 0x4c3f74 (VA 0xfffffff0074c7f74)
+# Prevents tcm_thread from probing non-existent MT6768 SPI2 (0x11012000) on MT6855
+struct.pack_into("<II", kdata, 0x4c3f74, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 69 at 0x4c3f74: _redwood_tcm_init -> mov w0, #0; ret")
+
+# Patch 70: Neutralize _redwood_buttons_init at 0x4c5188 (VA 0xfffffff0074c9188)
+# Prevents buttons_thread from probing Qualcomm SPMI button registers
+struct.pack_into("<II", kdata, 0x4c5188, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 70 at 0x4c5188: _redwood_buttons_init -> mov w0, #0; ret")
+
+# Patch 71: Restore genuine _redwood_ufs_init at 0x4c5abc (VA 0xfffffff0074c9abc)
+# (was mistakenly stubbed out; UFS initialization is strictly required for APFS mount!)
+struct.pack_into("<II", kdata, 0x4c5abc, 0xd103c3ff, 0xa9096ffc)
+print("[+] Restored genuine _redwood_ufs_init at 0x4c5abc (UFS hardware mapping enabled)")
+
+# Patch 72: Neutralize _redwood_adreno_init at 0x505b80 (VA 0xfffffff007509b80)
+# Prevents tail-call from touching Qualcomm Adreno GPU registers on MediaTek silicon
+struct.pack_into("<II", kdata, 0x505b80, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 72 at 0x505b80: _redwood_adreno_init -> mov w0, #0; ret")
+
+# Patch 73: Neutralize _redwood_cpufreq_init at 0x4cf42c (VA 0xfffffff0074d342c)
+# Eliminates unmapped cpufreq / DDR clock voting probes
+struct.pack_into("<II", kdata, 0x4cf42c, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 73 at 0x4cf42c: _redwood_cpufreq_init -> mov w0, #0; ret")
+
+# Patch 74: Neutralize _redwood_battery_init at 0x4ccdcc (VA 0xfffffff0074d0dcc)
+# Eliminates Qualcomm battery monitor probes
+struct.pack_into("<II", kdata, 0x4ccdcc, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 74 at 0x4ccdcc: _redwood_battery_init -> mov w0, #0; ret")
+
+# Patch 75: Neutralize _redwood_net_init at 0x4f8960 (VA 0xfffffff0074fc960)
+# Eliminates early network device allocation
+struct.pack_into("<II", kdata, 0x4f8960, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 75 at 0x4f8960: _redwood_net_init -> mov w0, #0; ret")
+
+# Patch 76: Neutralize _redwood_virtio_input_init at 0x4c0494 (VA 0xfffffff0074c4494)
+# Eliminates VirtIO input probe
+struct.pack_into("<II", kdata, 0x4c0494, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 76 at 0x4c0494: _redwood_virtio_input_init -> mov w0, #0; ret")
+
+# Patch 77: Neutralize _redwood_audio_init at 0x4db704 (VA 0xfffffff0074df704)
+# Eliminates speaker/haptic/camera audio subsystem probes
+struct.pack_into("<II", kdata, 0x4db704, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 77 at 0x4db704: _redwood_audio_init -> mov w0, #0; ret")
+
+# Patch 78: Neutralize _redwood_virtio_blk_init at 0x51047c (VA 0xfffffff00751447c)
+# Eliminates non-existent VirtIO block device probe
+struct.pack_into("<II", kdata, 0x51047c, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 78 at 0x51047c: _redwood_virtio_blk_init -> mov w0, #0; ret")
+
+# Patch 79: Restore genuine _redwood_apfs_check_init at 0x510b34 (VA 0xfffffff007514b34)
+# (was mistakenly stubbed out; apfs_volume_mount is required to mount /System/Volumes/iOS!)
+struct.pack_into("<II", kdata, 0x510b34, 0xa9bc6ffc, 0xa90157f6)
+print("[+] Restored genuine _redwood_apfs_check_init at 0x510b34 (apfs_volume mounter enabled)")
+
+# Patch 80: MT6855 UFSHC Base Address Fix at 0x4caee8 (VA 0xfffffff0074ceee8)
+# Replaces hardcoded Qualcomm UFSHC base 0x1d84000 with MediaTek MT6855 base 0x112b0000
+struct.pack_into("<II", kdata, 0x4caee8, 0x52800015, 0x72a22575)
+print("[+] Installed Patch 80 at 0x4caee8: MT6855 UFSHC base address validation (0x112b0000)")
+
+# Patch 81: MT6855 UFSHC Physical Base Mapping at 0x4cb01c (VA 0xfffffff0074cf01c)
+# Replaces ml_io_map(0x1d84000) with ml_io_map(0x112b0000) to map genuine MediaTek controller
+struct.pack_into("<II", kdata, 0x4cb01c, 0x52800000, 0x72a22560)
+print("[+] Installed Patch 81 at 0x4cb01c: MT6855 UFSHC physical base mapping (0x112b0000)")
+
+# Patch 82: Neutralize SCSI Whitelist Abort in _ufshc_probe at 0x4cae58 (VA 0xfffffff0074cee58)
+# Disarms cbz w21, 0x74cef88 so whitelist synthetic tests never abort native controller probe
+struct.pack_into("<I", kdata, 0x4cae58, 0xd503201f)
+print("[+] Installed Patch 82 at 0x4cae58: _ufshc_probe whitelist test abort disarmed -> nop")
+
+# Patch 83: Bypass _hc_uefi_slot0 Rejection at 0x4ca0fc (VA 0xfffffff0074ce0fc)
+# Returns NULL (SUCCESS) unconditionally so slot 0 WRITE(10) from clearing misc is accepted
+struct.pack_into("<II", kdata, 0x4ca0fc, 0xd2800000, 0xd65f03c0)
+print("[+] Installed Patch 83 at 0x4ca0fc: _hc_uefi_slot0 validation bypass -> mov x0, #0; ret")
+
+# Patch 84: Bypass _hc_prove TEST UNIT READY Timeout at 0x4ca5e4 (VA 0xfffffff0074ce5e4)
+# Returns 0 (SUCCESS) immediately, guaranteeing controller list switch is never undone
+struct.pack_into("<II", kdata, 0x4ca5e4, 0x52800000, 0xd65f03c0)
+print("[+] Installed Patch 84 at 0x4ca5e4: _hc_prove TUR proof bypass -> mov w0, #0; ret")
+
+# Patch 85: Invariant ufs_native_on Preservation at 0x4c7b84 (VA 0xfffffff0074cbb84)
+# Neutralizes strb wzr, [x22, #0xdd5] so native UFS remains permanently enabled
+struct.pack_into("<I", kdata, 0x4c7b84, 0xd503201f)
+print("[+] Installed Patch 85 at 0x4c7b84: ufs_native_on clearing neutralized -> nop")
+
+# Patch 86: Direct _ufs_read Non-Fallback Return at 0x4c7b34 & 0x4c7b38 (VA 0xfffffff0074cbb34)
+# Replaces cbnz w8, ...; mov w0, #0 with nop; mov w0, w8, returning ufshc_read status directly
+struct.pack_into("<II", kdata, 0x4c7b34, 0xd503201f, 0x2a0803e0)
+print("[+] Installed Patch 86 at 0x4c7b34: _ufs_read direct return -> nop; mov w0, w8")
+
 
 
 

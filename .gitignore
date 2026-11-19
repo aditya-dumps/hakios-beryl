@@ -37,3 +37,4 @@ logs/*
 __pycache__/
 *.pyc
 
+/scratch_*/

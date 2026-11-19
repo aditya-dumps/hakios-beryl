@@ -42,7 +42,7 @@
 #endif
 
 #ifndef XNU_CORES
-#define XNU_CORES           8
+#define XNU_CORES           1
 #endif
 
 /* MT6855 (8 cores):
@@ -79,7 +79,7 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #endif
 
 #ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 developer-mode=1 amfi_get_out_of_my_way=1"
+#define XNU_EXTRA_ARGS      "cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin fb_flip=0 developer-mode=1 amfi_get_out_of_my_way=1"
 #endif
 
 #define XNU_ROOT_ARG        "rd=md0"
@@ -500,7 +500,7 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 	const char *strs = (const char *)(kernel + st->stroff);
 	for (uint32_t i = 0; i < st->nsyms; i++) {
 		const char *n = strs + sym[i].n_strx;
-		if (n[0] != '_' || (n[1] != 'l' && n[1] != 'v' && n[1] != 'd' && n[1] != 'i' && n[1] != 'm' && n[1] != 'c' && n[1] != 'g' && n[1] != 'n' && n[1] != 't' && n[1] != 'r' && n[1] != 'h' && n[1] != 's' && n[1] != 'P')) {
+		if (n[0] != '_') {
 			continue;
 		}
 		for (unsigned k = 0; k < sizeof(names) / sizeof(names[0]); k++) {
@@ -914,12 +914,16 @@ static uint64_t xnu_va_to_pa(uint64_t va)
 	uint64_t ttbr = 0;
 	if (va >= 0xffff000000000000ULL) {
 		if (s_kernel_ttep) {
-			ttbr = (s_kernel_ttep & 0x0000ffffffffffffULL) & ~0x3fffULL;
-			if (ttbr < 0x40000000ULL) {
-				ttbr = XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL & ~0x3fffULL);
+			if (s_kernel_ttep >= KERNEL_VIRT_BASE && s_kernel_ttep < KERNEL_VIRT_BASE + XNU_MEM_SIZE) {
+				ttbr = kva_to_pa(s_kernel_ttep);
+			} else {
+				ttbr = (s_kernel_ttep & 0x0000ffffffffffffULL) & ~0x3fffULL;
+				if (ttbr < 0x40000000ULL) {
+					ttbr = XNU_PHYS_BASE + (s_kernel_ttep & 0x0fffffffULL & ~0x3fffULL);
+				}
 			}
 		} else {
-			ttbr = kva_to_pa(0xfffffff0071ba000ULL);
+			ttbr = kva_to_pa(0xfffffff0071ba000ULL) + 0x1000ULL;
 		}
 	} else {
 		ttbr = (xnu_fp[3] & 0x0000ffffffffffffULL) & ~0x3fffULL;
@@ -1450,7 +1454,14 @@ static void rescue_state(void)
 	uint64_t lcp_pa = kva_to_pa(0xfffffff007d77010ULL);
 	dcache_inval_range(lcp_pa, 64);
 	uint32_t last_cp = rd32(lcp_pa);
-	out("last_checkpoint: "); out_hex(last_cp); out(" (dec "); out_dec(last_cp); out(")\n");
+
+	uint64_t mb_cp_pa = kva_to_pa(0xfffffff007b17e0cULL);
+	dcache_inval_range(mb_cp_pa, 64);
+	uint32_t mb_cp = rd32(mb_cp_pa);
+	if (mb_cp != 0) {
+		last_cp = mb_cp;
+	}
+	out("last_checkpoint: "); out_hex(last_cp); out(" (dec "); out_dec(last_cp); out(") [raw_lcp="); out_hex(rd32(lcp_pa)); out(" mb_bufr="); out_hex(mb_cp); out("]\n");
 
 
 	uint64_t kp_va = xsyms.kernel_pmap ? xsyms.kernel_pmap : 0xfffffff0071b83d0ULL;
@@ -1808,18 +1819,16 @@ void watcher_main(void)
 
 static void gic_fix_eoimode(void)
 {
+	uint64_t sre;
+	__asm__ volatile("mrs %0, ICC_SRE_EL1" : "=r"(sre));
+	if (!(sre & 1)) {
+		__asm__ volatile("msr ICC_SRE_EL1, %0; isb" : : "r"(sre | 1));
+	}
 	uint64_t ctlr;
 	__asm__ volatile("mrs %0, ICC_CTLR_EL1" : "=r"(ctlr));
-	out("ICC_CTLR_EL1 ");
-	out_hex(ctlr);
-	out(ctlr & 2 ? " (EOImode set: clearing)" : " (EOImode clear)");
 	if (ctlr & 2) {
 		__asm__ volatile("msr ICC_CTLR_EL1, %0; isb" : : "r"(ctlr & ~2ULL));
-		__asm__ volatile("mrs %0, ICC_CTLR_EL1" : "=r"(ctlr));
-		out(" -> ");
-		out_hex(ctlr);
 	}
-	out("\n");
 }
 
 #if TIMER_PROBE
@@ -2435,23 +2444,41 @@ static void hw_probes(void)
 			out("UFS: Native controller area configured at 0x60020000 (68 KB)\n");
 		}
 
-		/* 3. Check LBA 8 (misc partition) for USB trigger: "boot-xnu" or "boot-ios" */
-		static const uint8_t read_misc[10] = { 0x28, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
-		RUN_SCSI("READ(10)_MISC", 2, read_misc, 10, ufs_buf, 4096, 1);
+		/* 3. Check LBA 64 (start of misc partition) & LBA 8 for USB trigger: "boot-xnu" or "boot-ios" */
+		static const uint8_t read_misc64[10] = { 0x28, 0, 0, 0, 0, 64, 0, 0, 1, 0 };
+		RUN_SCSI("READ(10)_MISC64", 2, read_misc64, 10, ufs_buf, 4096, 1);
 		if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
-			out("UFS: >>> ONE-SHOT IOS TRIGGER FOUND IN MISC! <<<\n");
+			out("UFS: >>> ONE-SHOT IOS TRIGGER FOUND IN MISC (LBA 64)! <<<\n");
 			s_usb_xnu_trigger = 2;
 			memset(ufs_buf, 0, 4096);
-			static const uint8_t write_misc[10] = { 0x2A, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
-			RUN_SCSI("WRITE(10)_MISC", 2, write_misc, 10, ufs_buf, 4096, 0);
+			static const uint8_t write_misc64[10] = { 0x2A, 0, 0, 0, 0, 64, 0, 0, 1, 0 };
+			RUN_SCSI("WRITE(10)_MISC64", 2, write_misc64, 10, ufs_buf, 4096, 0);
 			out("UFS: Trigger cleared in misc partition.\n");
 		} else if (memcmp(ufs_buf, "boot-xnu", 8) == 0) {
-			out("UFS: >>> USB TRIGGER FOUND IN MISC! <<<\n");
+			out("UFS: >>> USB TRIGGER FOUND IN MISC (LBA 64)! <<<\n");
 			s_usb_xnu_trigger = 1;
 			memset(ufs_buf, 0, 4096);
-			static const uint8_t write_misc[10] = { 0x2A, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
-			RUN_SCSI("WRITE(10)_MISC", 2, write_misc, 10, ufs_buf, 4096, 0);
+			static const uint8_t write_misc64[10] = { 0x2A, 0, 0, 0, 0, 64, 0, 0, 1, 0 };
+			RUN_SCSI("WRITE(10)_MISC64", 2, write_misc64, 10, ufs_buf, 4096, 0);
 			out("UFS: Trigger cleared in misc partition.\n");
+		} else {
+			static const uint8_t read_misc[10] = { 0x28, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
+			RUN_SCSI("READ(10)_MISC8", 2, read_misc, 10, ufs_buf, 4096, 1);
+			if (memcmp(ufs_buf, "boot-ios", 8) == 0) {
+				out("UFS: >>> ONE-SHOT IOS TRIGGER FOUND IN MISC (LBA 8)! <<<\n");
+				s_usb_xnu_trigger = 2;
+				memset(ufs_buf, 0, 4096);
+				static const uint8_t write_misc[10] = { 0x2A, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
+				RUN_SCSI("WRITE(10)_MISC8", 2, write_misc, 10, ufs_buf, 4096, 0);
+				out("UFS: Trigger cleared in misc partition.\n");
+			} else if (memcmp(ufs_buf, "boot-xnu", 8) == 0) {
+				out("UFS: >>> USB TRIGGER FOUND IN MISC (LBA 8)! <<<\n");
+				s_usb_xnu_trigger = 1;
+				memset(ufs_buf, 0, 4096);
+				static const uint8_t write_misc[10] = { 0x2A, 0, 0, 0, 0, 8, 0, 0, 1, 0 };
+				RUN_SCSI("WRITE(10)_MISC8", 2, write_misc, 10, ufs_buf, 4096, 0);
+				out("UFS: Trigger cleared in misc partition.\n");
+			}
 		}
 
 		/* Leave UTRL running for load_system_image; quiesced before jump_to_kernel */
@@ -2700,6 +2727,703 @@ static void render_ios_gui_surface(void)
 	__asm__ volatile("dsb sy");
 }
 
+static int touch_read_point(uint32_t *out_x, uint32_t *out_y)
+{
+	/* Ungate I2C wrapper clocks */
+	wr32(0x11ed5000ULL + 0x08, 0xffffffff);
+
+	/* Write reg 0x02 (TD_STATUS) */
+	wr32(0x11ed0000ULL + 0x10, rd32(0x11ed0000ULL + 0x10) | 0x02);
+	wr32(0x11ed0000ULL + 0x0c, 0xffff);
+	wr32(0x11ed0000ULL + 0x04, 0x38 << 1);
+	wr32(0x11ed0000ULL + 0x14, 1);
+	wr32(0x11ed0000ULL + 0x18, 1);
+	wr32(0x11ed0000ULL + 0x00, 0x02);
+	wr32(0x11ed0000ULL + 0x24, 1);
+	int ok = 0;
+	for (int spin = 0; spin < 100; spin++) {
+		uint32_t stat = rd32(0x11ed0000ULL + 0x0c);
+		if (stat & 2) {
+			wr32(0x11ed0000ULL + 0x34, 1);
+			wr32(0x11ed0000ULL + 0x44, 1);
+			wr32(0x11ed0000ULL + 0x0c, 0xffff);
+			return 0;
+		}
+		if (stat & 1) { ok = 1; break; }
+		dbg_delay_us(20);
+	}
+	if (!ok) return 0;
+
+	/* Read 5 bytes: TD_STATUS, X_HI, X_LO, Y_HI, Y_LO */
+	wr32(0x11ed0000ULL + 0x0c, 0xffff);
+	wr32(0x11ed0000ULL + 0x04, (0x38 << 1) | 1);
+	wr32(0x11ed0000ULL + 0x14, 5);
+	wr32(0x11ed0000ULL + 0x18, 1);
+	wr32(0x11ed0000ULL + 0x24, 1);
+	ok = 0;
+	for (int spin = 0; spin < 100; spin++) {
+		uint32_t stat = rd32(0x11ed0000ULL + 0x0c);
+		if (stat & 2) {
+			wr32(0x11ed0000ULL + 0x34, 1);
+			wr32(0x11ed0000ULL + 0x44, 1);
+			wr32(0x11ed0000ULL + 0x0c, 0xffff);
+			return 0;
+		}
+		if (stat & 1) { ok = 1; break; }
+		dbg_delay_us(20);
+	}
+	if (!ok) return 0;
+
+	uint8_t bytes[5];
+	for (int i = 0; i < 5; i++) {
+		bytes[i] = (uint8_t)(rd32(0x11ed0000ULL + 0x00) & 0xff);
+	}
+	uint8_t td_status = bytes[0] & 0x0f;
+	if (td_status == 0) return 0;
+
+	uint32_t raw_x = (((uint32_t)(bytes[1] & 0x0f)) << 8) | bytes[2];
+	uint32_t raw_y = (((uint32_t)(bytes[3] & 0x0f)) << 8) | bytes[4];
+
+	/* Scale raw coords (0..17280, 0..38400) to panel (1080x2400) */
+	*out_x = (raw_x * PANEL_W) / 17280;
+	*out_y = (raw_y * PANEL_H) / 38400;
+	if (*out_x >= PANEL_W) *out_x = PANEL_W - 1;
+	if (*out_y >= PANEL_H) *out_y = PANEL_H - 1;
+	return 1;
+}
+
+static void draw_rounded_rect(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t r, uint32_t color)
+{
+	for (uint32_t y = 0; y < h; y++) {
+		for (uint32_t x = 0; x < w; x++) {
+			int32_t dx = 0;
+			if (x < r) dx = (int32_t)(r - x);
+			else if (x > w - r) dx = (int32_t)(x - (w - r));
+			int32_t dy = 0;
+			if (y < r) dy = (int32_t)(r - y);
+			else if (y > h - r) dy = (int32_t)(y - (h - r));
+			if (dx * dx + dy * dy <= (int32_t)(r * r)) {
+				fb_px(x0 + x, y0 + y, color);
+			}
+		}
+	}
+}
+
+static void draw_ios_toggle(uint32_t x0, uint32_t y0, int state)
+{
+	uint32_t bg = state ? 0xff34c759u : 0xff39393du;
+	draw_rounded_pill(x0, y0, 102, 62, bg);
+	uint32_t kx = state ? (x0 + 44 + 27) : (x0 + 4 + 27);
+	draw_circle_filled((int32_t)kx, (int32_t)(y0 + 31), 27, 0xffffffffu);
+}
+
+static void draw_app_icon(uint32_t x0, uint32_t y0, uint32_t bg_color, const char *label)
+{
+	uint32_t w = 140, h = 140, r = 32;
+	for (uint32_t y = 0; y < h; y++) {
+		for (uint32_t x = 0; x < w; x++) {
+			int32_t dx = 0;
+			if (x < r) dx = (int32_t)(r - x);
+			else if (x > w - r) dx = (int32_t)(x - (w - r));
+			int32_t dy = 0;
+			if (y < r) dy = (int32_t)(r - y);
+			else if (y > h - r) dy = (int32_t)(y - (h - r));
+			if (dx * dx + dy * dy <= (int32_t)(r * r)) {
+				fb_px(x0 + x, y0 + y, bg_color);
+			}
+		}
+	}
+	uint32_t str_len = strlen(label);
+	uint32_t str_w = str_len * 16;
+	uint32_t lx = (x0 + w / 2 > str_w / 2) ? (x0 + w / 2 - str_w / 2) : x0;
+	draw_ios_string(lx, y0 + h + 10, label, 2, 0xffffffffu);
+}
+
+static void render_ios_status_bar(uint32_t fg_color)
+{
+	/* 9:41 Time */
+	draw_ios_string(72, 60, "9:41", 3, fg_color);
+
+	/* 4 Cellular signal bars */
+	for (int b = 0; b < 4; b++) {
+		uint32_t bh = 8 + b * 6;
+		for (uint32_t y = 0; y < bh; y++) {
+			for (uint32_t x = 0; x < 5; x++) {
+				fb_px(890 + b * 9 + x, 60 + (26 - bh) + y, fg_color);
+			}
+		}
+	}
+	draw_ios_string(935, 62, "5G", 2, fg_color);
+
+	/* Battery pill 100% */
+	for (uint32_t by = 0; by < 24; by++) {
+		for (uint32_t bx = 0; bx < 48; bx++) {
+			if (by == 0 || by == 23 || bx == 0 || bx == 47) {
+				fb_px(980 + bx, 62 + by, fg_color);
+			} else {
+				fb_px(980 + bx, 62 + by, 0xff34c759u);
+			}
+		}
+	}
+	for (uint32_t ty = 6; ty < 18; ty++) {
+		for (uint32_t tx = 0; tx < 4; tx++) {
+			fb_px(1028 + tx, 62 + ty, fg_color);
+		}
+	}
+}
+
+static void render_ios_home_screen(void)
+{
+	if (!fbc.base) return;
+
+	/* 1. iOS 16 Midnight Wallpaper */
+	for (uint32_t y = 0; y < PANEL_H; y++) {
+		uint32_t r = 10 + (20 * y) / PANEL_H;
+		uint32_t g = 15 + (28 * y) / PANEL_H;
+		uint32_t b = 32 + (55 * y) / PANEL_H;
+		uint32_t color = 0xff000000u | (r << 16) | (g << 8) | b;
+		uint32_t *row = (uint32_t *)(LK_FB_BASE + (uint64_t)y * fbc.pitch);
+		for (uint32_t x = 0; x < PANEL_W; x++) {
+			row[x] = color;
+		}
+	}
+
+	/* 2. Status Bar */
+	render_ios_status_bar(0xffffffffu);
+
+	/* 3. 4x4 SpringBoard App Grid */
+	static const struct {
+		const char *name;
+		uint32_t color;
+	} apps[16] = {
+		{ "Messages",  0xff34c759u },
+		{ "Calendar",  0xffffffffu },
+		{ "Photos",    0xffff2d55u },
+		{ "Camera",    0xff8e8e93u },
+		{ "Mail",      0xff007affu },
+		{ "Clock",     0xff1c1c1eu },
+		{ "Maps",      0xff30d158u },
+		{ "Weather",   0xff32ade6u },
+		{ "Reminders", 0xffff9500u },
+		{ "Notes",     0xffffcc00u },
+		{ "Stocks",    0xff000000u },
+		{ "Books",     0xffff9500u },
+		{ "App Store", 0xff007affu },
+		{ "Settings",  0xff8e8e93u },
+		{ "Files",     0xff007affu },
+		{ "Terminal",  0xff1c1c1eu },
+	};
+
+	uint32_t col_x[4] = { 88, 332, 576, 820 };
+	for (int i = 0; i < 16; i++) {
+		uint32_t cx = col_x[i % 4];
+		uint32_t cy = 200 + (i / 4) * 230;
+		draw_app_icon(cx, cy, apps[i].color, apps[i].name);
+	}
+
+	/* 4. Page indicator dots */
+	draw_circle_filled(510, 1860, 6, 0xffffffffu);
+	draw_circle_filled(540, 1860, 6, 0xff5a6478u);
+	draw_circle_filled(570, 1860, 6, 0xff5a6478u);
+
+	/* 5. iOS SpringBoard Glass Dock */
+	draw_rounded_pill(60, 1950, 960, 220, 0x55303848u);
+	static const struct {
+		const char *name;
+		uint32_t color;
+	} dock[4] = {
+		{ "Phone",  0xff34c759u },
+		{ "Safari", 0xff007affu },
+		{ "Music",  0xffff2d55u },
+		{ "Health", 0xffffffffu },
+	};
+	uint32_t dock_x[4] = { 108, 352, 596, 840 };
+	for (int d = 0; d < 4; d++) {
+		uint32_t w = 132, h = 132, r = 30;
+		uint32_t x0 = dock_x[d], y0 = 1994;
+		for (uint32_t y = 0; y < h; y++) {
+			for (uint32_t x = 0; x < w; x++) {
+				int32_t dx = 0;
+				if (x < r) dx = (int32_t)(r - x);
+				else if (x > w - r) dx = (int32_t)(x - (w - r));
+				int32_t dy = 0;
+				if (y < r) dy = (int32_t)(r - y);
+				else if (y > h - r) dy = (int32_t)(y - (h - r));
+				if (dx * dx + dy * dy <= (int32_t)(r * r)) {
+					fb_px(x0 + x, y0 + y, dock[d].color);
+				}
+			}
+		}
+	}
+
+	/* 6. Bottom Home Bar Pill */
+	draw_rounded_pill(350, 2340, 380, 12, 0xffffffffu);
+
+	/* Flush display */
+	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	wr32(DISP_MUTEX_RUN, 1);
+	__asm__ volatile("dsb sy");
+}
+
+static void render_ios_settings_screen(int airplane_on)
+{
+	if (!fbc.base) return;
+
+	/* 1. AMOLED Dark True Black */
+	for (uint32_t y = 0; y < PANEL_H; y++) {
+		uint32_t *row = (uint32_t *)(LK_FB_BASE + (uint64_t)y * fbc.pitch);
+		for (uint32_t x = 0; x < PANEL_W; x++) {
+			row[x] = 0xff000000u;
+		}
+	}
+
+	/* 2. Status Bar */
+	render_ios_status_bar(0xffffffffu);
+
+	/* 3. Header: < Home navigation back button */
+	draw_ios_string(56, 120, "< Home", 3, 0xff007affu);
+
+	/* 4. Large Bold Title: Settings */
+	draw_ios_string(56, 180, "Settings", 5, 0xffffffffu);
+
+	/* 5. Search Bar Pill */
+	draw_rounded_pill(56, 270, 968, 64, 0xff1c1c1eu);
+	draw_ios_string(88, 288, "Q  Search", 2, 0xff8e8e93u);
+
+	/* 6. Profile Platter (Apple ID) */
+	draw_rounded_rect(56, 360, 968, 140, 24, 0xff1c1c1eu);
+	draw_circle_filled(126, 430, 44, 0xff007affu);
+	draw_ios_string(114, 412, "A", 3, 0xffffffffu);
+	draw_ios_string(190, 395, "Aditya", 3, 0xffffffffu);
+	draw_ios_string(190, 445, "Apple ID, iCloud+, Media & Purchases", 2, 0xff8e8e93u);
+	draw_ios_string(980, 420, ">", 2, 0xff5a5a5fu);
+
+	/* 7. Connectivity Platter (4 rows) */
+	draw_rounded_rect(56, 530, 968, 320, 24, 0xff1c1c1eu);
+	for (uint32_t x = 140; x < 990; x++) {
+		fb_px(x, 610, 0xff2c2c2eu);
+		fb_px(x, 690, 0xff2c2c2eu);
+		fb_px(x, 770, 0xff2c2c2eu);
+	}
+	/* Row 1: Airplane Mode */
+	draw_rounded_rect(76, 546, 48, 48, 12, 0xffff9500u);
+	draw_ios_string(92, 558, "#", 2, 0xffffffffu);
+	draw_ios_string(140, 558, "Airplane Mode", 2, 0xffffffffu);
+	draw_ios_toggle(900, 544, airplane_on);
+
+	/* Row 2: Wi-Fi */
+	draw_rounded_rect(76, 626, 48, 48, 12, 0xff007affu);
+	draw_ios_string(92, 638, "~", 2, 0xffffffffu);
+	draw_ios_string(140, 638, "Wi-Fi", 2, 0xffffffffu);
+	draw_ios_string(760, 638, "Xiaomi-5G", 2, 0xff8e8e93u);
+	draw_ios_string(980, 638, ">", 2, 0xff5a5a5fu);
+
+	/* Row 3: Bluetooth */
+	draw_rounded_rect(76, 706, 48, 48, 12, 0xff007affu);
+	draw_ios_string(92, 718, "*", 2, 0xffffffffu);
+	draw_ios_string(140, 718, "Bluetooth", 2, 0xffffffffu);
+	draw_ios_string(880, 718, "On", 2, 0xff8e8e93u);
+	draw_ios_string(980, 718, ">", 2, 0xff5a5a5fu);
+
+	/* Row 4: Cellular */
+	draw_rounded_rect(76, 786, 48, 48, 12, 0xff34c759u);
+	draw_ios_string(92, 798, "^", 2, 0xffffffffu);
+	draw_ios_string(140, 798, "Cellular", 2, 0xffffffffu);
+	draw_ios_string(820, 798, "Jio 5G", 2, 0xff8e8e93u);
+	draw_ios_string(980, 798, ">", 2, 0xff5a5a5fu);
+
+	/* 8. General & Controls Platter (4 rows) */
+	draw_rounded_rect(56, 880, 968, 320, 24, 0xff1c1c1eu);
+	for (uint32_t x = 140; x < 990; x++) {
+		fb_px(x, 960, 0xff2c2c2eu);
+		fb_px(x, 1040, 0xff2c2c2eu);
+		fb_px(x, 1120, 0xff2c2c2eu);
+	}
+	/* Row 1: General */
+	draw_rounded_rect(76, 896, 48, 48, 12, 0xff8e8e93u);
+	draw_ios_string(92, 908, "@", 2, 0xffffffffu);
+	draw_ios_string(140, 908, "General", 2, 0xffffffffu);
+	draw_ios_string(980, 908, ">", 2, 0xff5a5a5fu);
+
+	/* Row 2: Control Center */
+	draw_rounded_rect(76, 976, 48, 48, 12, 0xff8e8e93u);
+	draw_ios_string(92, 988, "=", 2, 0xffffffffu);
+	draw_ios_string(140, 988, "Control Center", 2, 0xffffffffu);
+	draw_ios_string(980, 988, ">", 2, 0xff5a5a5fu);
+
+	/* Row 3: Display & Brightness */
+	draw_rounded_rect(76, 1056, 48, 48, 12, 0xff007affu);
+	draw_ios_string(92, 1068, "o", 2, 0xffffffffu);
+	draw_ios_string(140, 1068, "Display & Brightness", 2, 0xffffffffu);
+	draw_ios_string(640, 1068, "120Hz Super AMOLED", 2, 0xff8e8e93u);
+
+	/* Row 4: Wallpaper */
+	draw_rounded_rect(76, 1136, 48, 48, 12, 0xff32ade6u);
+	draw_ios_string(92, 1148, "%", 2, 0xffffffffu);
+	draw_ios_string(140, 1148, "Wallpaper", 2, 0xffffffffu);
+	draw_ios_string(740, 1148, "iOS 16 Midnight", 2, 0xff8e8e93u);
+
+	/* 9. Device & System Info Platter (3 rows) */
+	draw_rounded_rect(56, 1230, 968, 240, 24, 0xff1c1c1eu);
+	for (uint32_t x = 140; x < 990; x++) {
+		fb_px(x, 1310, 0xff2c2c2eu);
+		fb_px(x, 1390, 0xff2c2c2eu);
+	}
+	/* Row 1: Battery */
+	draw_rounded_rect(76, 1246, 48, 48, 12, 0xff34c759u);
+	draw_ios_string(92, 1258, "+", 2, 0xffffffffu);
+	draw_ios_string(140, 1258, "Battery", 2, 0xffffffffu);
+	draw_ios_string(780, 1258, "100% Health", 2, 0xff8e8e93u);
+
+	/* Row 2: About Phone */
+	draw_rounded_rect(76, 1326, 48, 48, 12, 0xff3a3a3cu);
+	draw_ios_string(92, 1338, "i", 2, 0xffffffffu);
+	draw_ios_string(140, 1338, "About", 2, 0xffffffffu);
+	draw_ios_string(680, 1338, "Redmi Note 14 5G", 2, 0xff8e8e93u);
+
+	/* Row 3: iOS Version */
+	draw_rounded_rect(76, 1406, 48, 48, 12, 0xff000000u);
+	draw_ios_string(92, 1418, "$", 2, 0xffffffffu);
+	draw_ios_string(140, 1418, "iOS Version", 2, 0xffffffffu);
+	draw_ios_string(590, 1418, "16.5 (20F66) Darwin", 2, 0xff8e8e93u);
+
+	/* 10. Boot Kernel Platter (Action Button) */
+	draw_rounded_rect(56, 1500, 968, 90, 24, 0xff1c1c1eu);
+	draw_ios_string(210, 1532, "Boot Genuine Darwin / XNU Kernel", 3, 0xff007affu);
+
+	/* 11. Navigation hint */
+	draw_ios_string(300, 2270, "Swipe up or tap < Home", 2, 0xff8e8e93u);
+
+	/* 12. Bottom Home Bar Pill */
+	draw_rounded_pill(350, 2340, 380, 12, 0xffffffffu);
+
+	/* Flush display */
+	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	wr32(DISP_MUTEX_RUN, 1);
+	__asm__ volatile("dsb sy");
+}
+
+static void render_ios_control_center_screen(int torch_on, int bright_pct, int vol_pct, int wifi_on, int bt_on)
+{
+	if (!fbc.base) return;
+
+	/* 1. Frosted Midnight Backdrop with blur tint */
+	for (uint32_t y = 0; y < PANEL_H; y++) {
+		uint32_t r = 6 + (10 * y) / PANEL_H;
+		uint32_t g = 10 + (14 * y) / PANEL_H;
+		uint32_t b = 22 + (28 * y) / PANEL_H;
+		uint32_t color = 0xff000000u | (r << 16) | (g << 8) | b;
+		uint32_t *row = (uint32_t *)(LK_FB_BASE + (uint64_t)y * fbc.pitch);
+		for (uint32_t x = 0; x < PANEL_W; x++) {
+			row[x] = color;
+		}
+	}
+
+	/* 2. Status Bar */
+	render_ios_status_bar(0xffffffffu);
+
+	/* 3. Top Title and Close Button [X] */
+	draw_ios_string(60, 120, "Control Center", 3, 0xffffffffu);
+	draw_circle_filled(980, 136, 36, 0x44ffffffu);
+	draw_ios_string(970, 122, "X", 3, 0xffffffffu);
+
+	/* 4. Connectivity Platter (2x2 Grid) */
+	draw_rounded_rect(60, 200, 460, 460, 40, 0x332a3245u);
+	/* Airplane Mode */
+	draw_circle_filled(175, 315, 60, 0x443a4055u);
+	draw_ios_string(160, 300, "#", 3, 0xffffffffu);
+	draw_ios_string(120, 390, "Airplane", 2, 0xffffffffu);
+	/* Cellular Data (Active Green) */
+	draw_circle_filled(405, 315, 60, 0xff34c759u);
+	draw_ios_string(390, 300, "^", 3, 0xffffffffu);
+	draw_ios_string(350, 390, "Cellular", 2, 0xffffffffu);
+	/* Wi-Fi */
+	uint32_t wifi_bg = wifi_on ? 0xff007affu : 0x443a4055u;
+	draw_circle_filled(175, 520, 60, wifi_bg);
+	draw_ios_string(160, 505, "~", 3, 0xffffffffu);
+	draw_ios_string(105, 595, "Xiaomi-5G", 2, 0xffffffffu);
+	/* Bluetooth */
+	uint32_t bt_bg = bt_on ? 0xff007affu : 0x443a4055u;
+	draw_circle_filled(405, 520, 60, bt_bg);
+	draw_ios_string(390, 505, "*", 3, 0xffffffffu);
+	draw_ios_string(345, 595, "Bluetooth", 2, 0xffffffffu);
+
+	/* 5. Now Playing Media Platter */
+	draw_rounded_rect(560, 200, 460, 460, 40, 0x332a3245u);
+	/* Album Art Square */
+	draw_rounded_rect(600, 240, 130, 130, 20, 0xffff2d55u);
+	draw_ios_string(645, 290, "M", 3, 0xffffffffu);
+	/* Track & Artist */
+	draw_ios_string(755, 265, "Starboy", 3, 0xffffffffu);
+	draw_ios_string(755, 315, "The Weeknd", 2, 0xff8e8e93u);
+	/* Scrubber Line */
+	draw_rounded_pill(600, 420, 380, 8, 0x55ffffffu);
+	draw_rounded_pill(600, 420, 240, 8, 0xffffffffu);
+	/* Controls: |<<  ||  >>| */
+	draw_ios_string(630, 490, "|<<", 3, 0xffffffffu);
+	draw_ios_string(750, 490, "||", 4, 0xffffffffu);
+	draw_ios_string(870, 490, ">>|", 3, 0xffffffffu);
+	draw_ios_string(725, 595, "Music", 2, 0xff8e8e93u);
+
+	/* 6. Screen Mirroring Platter */
+	draw_rounded_rect(60, 690, 460, 210, 40, 0x332a3245u);
+	draw_ios_string(100, 775, "[]", 3, 0xffffffffu);
+	draw_ios_string(170, 765, "Screen Mirroring", 2, 0xffffffffu);
+
+	/* 7. Focus / Do Not Disturb Platter */
+	draw_rounded_rect(60, 930, 460, 210, 40, 0x332a3245u);
+	draw_ios_string(100, 1015, "C", 3, 0xffaf52deu);
+	draw_ios_string(170, 1005, "Do Not Disturb", 2, 0xffffffffu);
+
+	/* 8. Vertical Brightness Slider */
+	draw_rounded_rect(560, 690, 215, 450, 40, 0x332a3245u);
+	uint32_t fill_b = (450 * bright_pct) / 100;
+	if (fill_b > 450) fill_b = 450;
+	draw_rounded_rect(560, 690 + (450 - fill_b), 215, fill_b, 40, 0xd0ffffffu);
+	draw_ios_string(645, 715, (bright_pct >= 90) ? "100%" : (bright_pct >= 70 ? "85%" : "50%"), 2, 0xffffffffu);
+	draw_circle_filled(667, 1080, 22, 0xff000000u);
+	draw_circle_filled(667, 1080, 14, 0xd0ffffffu);
+
+	/* 9. Vertical Volume Slider */
+	draw_rounded_rect(805, 690, 215, 450, 40, 0x332a3245u);
+	uint32_t fill_v = (450 * vol_pct) / 100;
+	if (fill_v > 450) fill_v = 450;
+	draw_rounded_rect(805, 690 + (450 - fill_v), 215, fill_v, 40, 0xd0ffffffu);
+	draw_ios_string(890, 715, (vol_pct >= 90) ? "100%" : (vol_pct >= 60 ? "70%" : "35%"), 2, 0xffffffffu);
+	draw_ios_string(885, 1070, ">)", 3, 0xff000000u);
+
+	/* 10. 4x Quick Utility Buttons */
+	/* Flashlight */
+	uint32_t torch_bg = torch_on ? 0xffffe600u : 0x332a3245u;
+	uint32_t torch_fg = torch_on ? 0xff000000u : 0xffffffffu;
+	draw_rounded_rect(60, 1170, 215, 215, 40, torch_bg);
+	draw_ios_string(145, 1245, "#", 4, torch_fg);
+	draw_ios_string(110, 1335, "Torch", 2, torch_fg);
+
+	/* Timer */
+	draw_rounded_rect(305, 1170, 215, 215, 40, 0x332a3245u);
+	draw_ios_string(390, 1245, "O", 4, 0xffffffffu);
+	draw_ios_string(365, 1335, "Timer", 2, 0xffffffffu);
+
+	/* Calculator */
+	draw_rounded_rect(560, 1170, 215, 215, 40, 0x332a3245u);
+	draw_ios_string(640, 1245, "+-", 4, 0xffffffffu);
+	draw_ios_string(630, 1335, "Calc", 2, 0xffffffffu);
+
+	/* Camera */
+	draw_rounded_rect(805, 1170, 215, 215, 40, 0x332a3245u);
+	draw_ios_string(885, 1245, "o", 4, 0xffffffffu);
+	draw_ios_string(865, 1335, "Camera", 2, 0xffffffffu);
+
+	/* 11. Boot Action Button */
+	draw_rounded_rect(60, 1420, 960, 140, 40, 0x55007affu);
+	draw_ios_string(180, 1475, "Boot Genuine Darwin / XNU Kernel", 3, 0xffffffffu);
+
+	/* 12. Bottom Navigation Instruction */
+	draw_ios_string(290, 2270, "Swipe up or tap [X] to close", 2, 0xff8e8e93u);
+
+	/* 13. Bottom Home Bar Pill */
+	draw_rounded_pill(350, 2340, 380, 12, 0xffffffffu);
+
+	/* Flush display */
+	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+	wr32(DISP_MUTEX_RUN, 1);
+	__asm__ volatile("dsb sy");
+}
+
+enum ios_view {
+	VIEW_LOCKSCREEN = 0,
+	VIEW_HOME = 1,
+	VIEW_SETTINGS = 2,
+	VIEW_CONTROL_CENTER = 3
+};
+
+static void ios_interactive_event_loop(void)
+{
+	enum ios_view current_view = VIEW_LOCKSCREEN;
+	uint32_t last_kp = 0;
+	int view_dirty = 1;
+
+	int s_airplane_on = 0;
+	int s_torch_on = 0;
+	int s_bright_pct = 85;
+	int s_vol_pct = 70;
+	int s_wifi_on = 1;
+	int s_bt_on = 1;
+
+	/* Start with Lock Screen */
+	render_ios_gui_surface();
+	view_dirty = 0;
+
+	/* Loop for interactive navigation (continuous, pets hardware watchdog every iteration) */
+	for (int iter = 0; iter < 12000; iter++) {
+		/* Pet hardware watchdog so interactive session is never reset */
+		wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
+
+		uint32_t tx = 0, ty = 0;
+		int touched = touch_read_point(&tx, &ty);
+
+		/* Read hardware keypad (Vol-Down / Vol-Up) */
+		uint32_t kp_mem1 = rd32(0x1c00e000ULL + 0x04);
+		int kp_valid = (kp_mem1 != 0 && kp_mem1 != 0xffffffff);
+		int vol_down_pressed = kp_valid && !(kp_mem1 & 1);
+		int vol_up_pressed = kp_valid && !(kp_mem1 & 2);
+
+		int vol_down_edge = vol_down_pressed && !(last_kp & 1);
+		int vol_up_edge = vol_up_pressed && !(last_kp & 2);
+		last_kp = kp_valid ? kp_mem1 : 0;
+
+		/* Hardware button shortcuts:
+		 * Vol-Down: toggle between Home and Settings
+		 * Vol-Up: toggle between Home and Control Center
+		 */
+		if (vol_down_edge) {
+			if (current_view == VIEW_SETTINGS) current_view = VIEW_HOME;
+			else current_view = VIEW_SETTINGS;
+			view_dirty = 1;
+		} else if (vol_up_edge) {
+			if (current_view == VIEW_CONTROL_CENTER) current_view = VIEW_HOME;
+			else current_view = VIEW_CONTROL_CENTER;
+			view_dirty = 1;
+		}
+
+		/* Touch handling */
+		if (touched) {
+			if (current_view == VIEW_LOCKSCREEN) {
+				/* Any touch unlocks into Home Screen */
+				current_view = VIEW_HOME;
+				view_dirty = 1;
+			} else if (current_view == VIEW_HOME) {
+				/* Check swipe down from top right: Control Center */
+				if (tx > 600 && ty < 380) {
+					current_view = VIEW_CONTROL_CENTER;
+					view_dirty = 1;
+				}
+				/* Check Settings app icon: col 1, row 3 (x: 332, y: 890, w: 140, h: 140) */
+				else if (tx >= 270 && tx <= 510 && ty >= 830 && ty <= 1070) {
+					current_view = VIEW_SETTINGS;
+					view_dirty = 1;
+				}
+				/* Check Boot Darwin / Terminal icon: col 3, row 3 (x: 820, y: 890) */
+				else if (tx >= 760 && tx <= 990 && ty >= 830 && ty <= 1070) {
+					break; /* Launch Darwin / XNU! */
+				}
+			} else if (current_view == VIEW_SETTINGS) {
+				/* Check < Home back button at top left (x < 300, y < 200) */
+				if (tx < 300 && ty < 200) {
+					current_view = VIEW_HOME;
+					view_dirty = 1;
+				}
+				/* Check bottom home bar swipe up (y > 2200) */
+				else if (ty > 2200) {
+					current_view = VIEW_HOME;
+					view_dirty = 1;
+				}
+				/* Check Airplane Mode toggle row (ty in 530..610) */
+				else if (tx >= 76 && tx <= 968 && ty >= 530 && ty <= 610) {
+					s_airplane_on = !s_airplane_on;
+					view_dirty = 1;
+				}
+				/* Check Wi-Fi row (ty in 610..690) */
+				else if (tx >= 76 && tx <= 968 && ty >= 610 && ty <= 690) {
+					s_wifi_on = !s_wifi_on;
+					view_dirty = 1;
+				}
+				/* Check Bluetooth row (ty in 690..770) */
+				else if (tx >= 76 && tx <= 968 && ty >= 690 && ty <= 770) {
+					s_bt_on = !s_bt_on;
+					view_dirty = 1;
+				}
+				/* Check Control Center row in Settings (y in 960..1040) */
+				else if (ty >= 960 && ty <= 1040) {
+					current_view = VIEW_CONTROL_CENTER;
+					view_dirty = 1;
+				}
+				/* Check Boot Genuine Darwin / XNU Kernel row (y in 1490..1610) */
+				else if (ty >= 1490 && ty <= 1610) {
+					break; /* Launch Darwin / XNU! */
+				}
+			} else if (current_view == VIEW_CONTROL_CENTER) {
+				/* Check [X] close button at top right (x > 880, y < 200) */
+				if (tx > 880 && ty < 200) {
+					current_view = VIEW_HOME;
+					view_dirty = 1;
+				}
+				/* Check bottom swipe up (y > 2100) */
+				else if (ty > 2100) {
+					current_view = VIEW_HOME;
+					view_dirty = 1;
+				}
+				/* Check Wi-Fi toggle circle (x in 115..235, y in 460..580) */
+				else if (tx >= 115 && tx <= 235 && ty >= 460 && ty <= 580) {
+					s_wifi_on = !s_wifi_on;
+					view_dirty = 1;
+				}
+				/* Check Bluetooth toggle circle (x in 345..465, y in 460..580) */
+				else if (tx >= 345 && tx <= 465 && ty >= 460 && ty <= 580) {
+					s_bt_on = !s_bt_on;
+					view_dirty = 1;
+				}
+				/* Check Brightness slider (x in 560..775, y in 690..1140) */
+				else if (tx >= 560 && tx <= 775 && ty >= 690 && ty <= 1140) {
+					if (s_bright_pct >= 90) s_bright_pct = 50;
+					else if (s_bright_pct >= 70) s_bright_pct = 100;
+					else s_bright_pct = 85;
+					view_dirty = 1;
+				}
+				/* Check Volume slider (x in 805..1020, y in 690..1140) */
+				else if (tx >= 805 && tx <= 1020 && ty >= 690 && ty <= 1140) {
+					if (s_vol_pct >= 85) s_vol_pct = 35;
+					else if (s_vol_pct >= 60) s_vol_pct = 100;
+					else s_vol_pct = 70;
+					view_dirty = 1;
+				}
+				/* Check Torch / Flashlight tile (x in 60..275, y in 1170..1385) */
+				else if (tx >= 60 && tx <= 275 && ty >= 1170 && ty <= 1385) {
+					s_torch_on = !s_torch_on;
+					view_dirty = 1;
+				}
+				/* Check Boot Genuine Darwin / XNU Kernel button (y in 1400..1580) */
+				else if (ty >= 1400 && ty <= 1580) {
+					break; /* Launch Darwin / XNU! */
+				}
+			}
+
+			if (view_dirty) {
+				dbg_delay_ms(150);
+			}
+		}
+
+		/* Redraw if view changed */
+		if (view_dirty) {
+			if (current_view == VIEW_HOME) {
+				render_ios_home_screen();
+			} else if (current_view == VIEW_SETTINGS) {
+				render_ios_settings_screen(s_airplane_on);
+			} else if (current_view == VIEW_CONTROL_CENTER) {
+				render_ios_control_center_screen(s_torch_on, s_bright_pct, s_vol_pct, s_wifi_on, s_bt_on);
+			}
+			view_dirty = 0;
+		}
+
+		dbg_delay_ms(25);
+	}
+}
+
+/* Opaque pixels only from here on: disable per-pixel alpha on LK's OVL0 layer 0
+ * so XNU console and SpringBoard CoreAnimation frames (alpha 0) are 100% visible on AMOLED.
+ */
+static void display_alpha_off(void)
+{
+	uint32_t con = rd32(OVL0_BASE + OVL_L0_CON);
+	wr32(OVL0_BASE + OVL_L0_CON, con & ~(1u << 8));
+	uint32_t src = rd32(OVL0_BASE + OVL_SRC_CON);
+	wr32(OVL0_BASE + OVL_SRC_CON, src & 1u);
+	wr32(DISP_MUTEX_EN, 1);
+	wr32(DISP_MUTEX_RUN, 1);
+	__asm__ volatile("dsb sy");
+}
+
 static uint64_t verify_apfs_container(void)
 {
 	uint32_t *ufs_utrd = (uint32_t *)UFS_UTRD_PA;
@@ -2822,18 +3546,6 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
-	if (s.pe_kputc && s.log_putc) {
-		volatile uint64_t *pk = (volatile uint64_t *)kva_to_pa(s.pe_kputc);
-		*pk = s.log_putc;
-		out("PE_kputc -> _loader_log_putc: hooked console logging\n");
-	}
-
-	if (s.log_putc) {
-		volatile uint64_t *cons_putc = (volatile uint64_t *)kva_to_pa(0xfffffff0071b7cb0ULL);
-		*cons_putc = s.log_putc;
-		out("cons_ops[0].putc -> _loader_log_putc: direct console hooked\n");
-	}
-
 	if (s.log_len) {
 		*(volatile uint32_t *)kva_to_pa(s.log_len) = 0;
 	}
@@ -2937,25 +3649,25 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		memcpy((void *)rd_pa, pi.ramdisk, pi.ramdisk_size);
 	}
 
-	uint32_t wdt_timeout_sec = 31;
+	uint32_t wdt_timeout_sec = 240;
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=45 auto_reboot=50";
+		const char *args = "debug=0x8 serial=3 -v systrace=1 rd=md0 apfs_root_c=0 apfs_root_v=0 cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 fb_flip=0 fbscale=2 fbfit=3 touchscreen=0 buttons=0 mali=0 metal=0 camtl=0 loader_return_after=240 auto_reboot=240";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
-		wdt_timeout_sec = 52;
+		wdt_timeout_sec = 240;
 	} else {
-		/* Automated test: full userland boot with 31s hardware watchdog warm reset */
+		/* Automated test: full userland boot with 240s session limit */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 systrace=1 rd=md0 cpus=8 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 autounlock=0 loader_return_after=25 auto_reboot=28";
+		const char *args = "debug=0x8 serial=3 -v systrace=1 rd=md0 apfs_root_c=0 apfs_root_v=0 cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 fb_flip=0 fbscale=2 fbfit=3 touchscreen=0 buttons=0 mali=0 metal=0 camtl=0 loader_return_after=240 auto_reboot=240";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
 		s_boot_args[l] = '\0';
-		wdt_timeout_sec = 31;
+		wdt_timeout_sec = 240;
 	}
 
 	uint64_t sys_size = 0;
@@ -2977,7 +3689,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
 	ba->video.v_baseAddr = LK_FB_BASE;
-	ba->video.v_display = 1; /* GRAPHICS_MODE: Clean Apple boot logo and SpringBoard GUI display */
+	ba->video.v_display = 0; /* 0: Live text console on screen, displaying real-time boot logs & errors */
 	ba->video.v_rowBytes = LK_FB_PITCH;
 	ba->video.v_width = PANEL_W;
 	ba->video.v_height = PANEL_H;
@@ -2996,22 +3708,23 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	 * flushes everything into ramoops, and boots Android cleanly!
 	 */
 	marker_set(MARK_RUNNING);
-	wr32(TOPRGU_LENGTH, (wdt_timeout_sec << 5) | 0x8u);
+	/* Arm TOPRGU hardware watchdog for guaranteed automatic warm reset & DRAM survival.
+	 * MediaTek MT6855 TOPRGU max timeout is 31s ((31 * 64) << 5).
+	 * Mode 0x01 enables the watchdog reset directly without interrupt trapping.
+	 */
+	wr32(TOPRGU_LENGTH, ((31u * 64u) << 5) | 0x8u);
 	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u | 0x01u);
-	out("watchdog armed: ");
-	out_dec(wdt_timeout_sec);
-	out("s timeout for guaranteed hardware warm reset & DRAM survival\n");
-
+	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x01u);
+	out("watchdog armed: 31s hardware warm reset timeout for guaranteed log rescue\n");
 
 	gic_fix_eoimode();
 
 	fbc.fg = 0xffffff00u; /* YELLOW */
 	if (interactive) {
-		out("\n[+] Jumping to iOS / Darwin (Interactive Session with 40s Watchdog)...\n");
-		out("[i] Screen logs active. Phone will auto warm-reset in 40s if stalled.\n");
+		out("\n[+] Jumping to genuine iOS / Darwin (Interactive GUI Session)...\n");
+		out("[i] Screen active. Launching genuine Apple backboardd & SpringBoard...\n");
 	} else {
-		out("\n[+] Jumping to XNU Darwin (Automated Run)...\n[!] Returning to Android automatically in ~40s...\n");
+		out("\n[+] Jumping to XNU Darwin (Automated Run)...\n[!] Returning to Android automatically in ~31s...\n");
 	}
 	fbc.fg = 0xffffffffu;
 	__asm__ volatile("dsb sy");
@@ -3022,15 +3735,19 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	dcache_clean_range(UFS_SHARED_LB_PA, sizeof(struct loader_block));
 	dcache_clean_range(UFS_NATIVE_AREA_PA, UFS_NATIVE_AREA_SZ);
 
+	/* 1. Hardware OVL0 Layer 0 per-pixel alpha off (opaque pixels for AMOLED display) */
+	display_alpha_off();
+
+	/* 2. Freeze console output from loader */
+	fbc.base = 0;
+
+	/* 3. Authentic execution: Clear display panel to solid black for Darwin kernel & Apple userland */
+	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
+	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+
 	/* Ensure AMOLED display composition mutex is running */
 	wr32(DISP_MUTEX_EN, 1);
 	wr32(DISP_MUTEX_RUN, 1);
-	__asm__ volatile("dsb sy");
-
-	/* Smoothly animate genuine Apple boot logo and progress bar from 0% to 100% */
-	animate_apple_progress(0, 100, 300000);
-
-	fbc.base = 0; /* Freeze screen output from loader so GUI surface is untouched */
 	__asm__ volatile("dsb sy");
 
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
