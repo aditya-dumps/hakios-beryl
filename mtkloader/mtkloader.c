@@ -416,12 +416,8 @@ volatile struct fbcon fbc __attribute__((aligned(8)));
 
 static void display_find(int clear)
 {
-	if (!clear) return;
-	/* Clear primary screen buffer (10.44 MB) to black */
-	volatile uint64_t *p = (volatile uint64_t *)LK_FB_BASE;
-	for (uint64_t i = 0; i < FB_SCREEN_SIZE / 8; i++) {
-		p[i] = 0xff000000ff000000ULL;
-	}
+	(void)clear;
+	/* Preserve LK framebuffer contents and enable live on-screen text logging */
 	__asm__ volatile("dsb sy");
 }
 
@@ -842,6 +838,19 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_end(&w); /* touch */
 
 	dt_end(&w); /* i2c0 */
+
+	dt_begin(&w, "display-subsystem");
+	dt_prop_str(&w, "device_type", "display");
+	dt_prop_str(&w, "compatible", "redwood,framebuffer");
+	dt_prop_u32(&w, "width", PANEL_W);
+	dt_prop_u32(&w, "height", PANEL_H);
+	dt_prop_u32(&w, "depth", 32);
+	dt_prop_u32(&w, "rowbytes", LK_FB_PITCH);
+	uint64_t fb_reg[2] = { LK_FB_BASE, FB_SCREEN_SIZE };
+	dt_prop(&w, "reg", fb_reg, sizeof(fb_reg));
+	dt_prop_u32(&w, "display-scale", 2);
+	dt_prop_u32(&w, "artwork-scale-factor", 2);
+	dt_end(&w);
 
 	dt_begin(&w, "disp0");
 	dt_prop_str(&w, "device_type", "display");
@@ -3661,15 +3670,13 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 		}
 	}
 
-	/* Keep internal/serial console (cons_ops_index = 0) so XNU text console does NOT clear
-	 * or overwrite the AMOLED framebuffer at 0xfe0c0000.
-	 * This preserves the Apple boot logo and progress bar, giving MiniIOMobileFramebuffer
-	 * exclusive ownership of the AMOLED display for SpringBoard GUI presentation.
+	/* Enable video console (cons_ops_index = 1) so XNU text console and logs
+	 * render directly on the AMOLED display at 0xfe0c0000 via _vcputc.
 	 */
 	if (s.cons_ops_index) {
 		volatile uint32_t *idx = (volatile uint32_t *)kva_to_pa(s.cons_ops_index);
-		*idx = 0; /* 0 = internal/serial console: preserves Apple Logo & SpringBoard GUI surface */
-		out("cons_ops_index: 0 (exclusive GUI framebuffer presentation on AMOLED)\n");
+		*idx = 1; /* 1 = video console: visible real-time boot logs & userland diagnostics on AMOLED */
+		out("cons_ops_index: 1 (video console enabled for AMOLED display)\n");
 	}
 
 
@@ -3685,7 +3692,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	if (interactive) {
 		/* Instant Boot On-Demand: UFS blocks served as needed by XNU via ufs_shared_pa / ufs_native */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 -v systrace=1 rd=md0 apfs_root_c=0 apfs_root_v=0 cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 fb_flip=0 fbscale=2 fbfit=3 touchscreen=0 buttons=0 mali=0 metal=0 camtl=0 loader_return_after=240 auto_reboot=240";
+		const char *args = "debug=0x8 serial=3 -v systrace=1 rd=md0 apfs_root_c=0 apfs_root_v=0 cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 fb_flip=0 fbscale=2 fbfit=3 touchscreen=0 buttons=0 mali=0 metal=0 camtl=0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 mp_ufsrw=1 mp_rootrw=1 mp_null_tee=backboardd,SpringBoard,assetsd loader_return_after=240 auto_reboot=240";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -3694,7 +3701,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	} else {
 		/* Automated test: full userland boot with 240s session limit */
 		verify_apfs_container();
-		const char *args = "debug=0x8 serial=3 -v systrace=1 rd=md0 apfs_root_c=0 apfs_root_v=0 cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 fb_flip=0 fbscale=2 fbfit=3 touchscreen=0 buttons=0 mali=0 metal=0 camtl=0 loader_return_after=240 auto_reboot=240";
+		const char *args = "debug=0x8 serial=3 -v systrace=1 rd=md0 apfs_root_c=0 apfs_root_v=0 cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin interactive=1 sb_wallpaper=1 ca_vbl=1 caenv=CA_FORCE_TIMER=1 caenv=CA_FORCE_DOUBLE_BUFFERING=1 ca_dirty=0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1 amfi=0xff cs_debug=1 coredump=0 fb_flip=0 fbscale=2 fbfit=3 touchscreen=0 buttons=0 mali=0 metal=0 camtl=0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 mp_ufsrw=1 mp_rootrw=1 mp_null_tee=backboardd,SpringBoard,assetsd loader_return_after=240 auto_reboot=240";
 		size_t l = strlen(args);
 		if (l >= sizeof(s_boot_args)) l = sizeof(s_boot_args) - 1;
 		memcpy(s_boot_args, args, l);
@@ -3718,6 +3725,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	ba->memSize = XNU_MEM_SIZE;
 	ba->memSizeActual = ba->memSize;
 	ba->topOfKernelData = top;
+	ba->bootFlags = 1ULL;
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
 	ba->video.v_baseAddr = LK_FB_BASE;
