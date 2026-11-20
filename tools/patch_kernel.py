@@ -805,14 +805,15 @@ print("[+] Installed Patch 44 at 0xad4f78: _PE_init_kprintf preserve _PE_kputc (
 struct.pack_into("<Q", kdata, 0x1b3cb0, 0xfffffff007475178)
 print("[+] Installed Patch 45 at 0x1b3cb0: cons_ops[0].putc -> _loader_log_putc (0xfffffff007475178)")
 
-# Patch 45b: Point const_cons_ops[1].putc at 0x1b3cc0 (VA 0xfffffff0071b7cc0) -> _loader_log_putc (0xfffffff007475178)
-# Ensures that even when video console is active, all kprintf/printf calls route directly to DRAM ring buffer!
-struct.pack_into("<Q", kdata, 0x1b3cc0, 0xfffffff007475178)
-print("[+] Installed Patch 45b at 0x1b3cc0: cons_ops[1].putc -> _loader_log_putc (0xfffffff007475178)")
+# Patch 45b: Restore genuine const_cons_ops[1].putc at 0x1b3cc0 (VA 0xfffffff0071b7cc0) -> _vcputc (0xfffffff007429f2c)
+# Ensures that video console draws all characters directly to framebuffer pixels on the AMOLED screen!
+struct.pack_into("<Q", kdata, 0x1b3cc0, 0xfffffff007429f2c)
+print("[+] Restored genuine cons_ops[1].putc -> _vcputc (0xfffffff007429f2c)")
 
-# Patch 45c: Neutralize _switch_to_video_console at 0x4238e0 (VA 0xfffffff0074278e0): mov w0, #0; ret
-struct.pack_into("<II", kdata, 0x4238e0, 0x52800000, 0xd65f03c0)
-print("[+] Installed Patch 45c at 0x4238e0: _switch_to_video_console -> mov w0, #0; ret (cons_ops_index kept at 0)")
+# Patch 45c: Restore genuine _switch_to_video_console at 0x4238e0 (VA 0xfffffff0074278e0)
+# adrp x8, #0xfffffff0071b7000; ldr w0, [x8, #0xcd0]; mov w9, #1; str w9, [x8, #0xcd0]; ret
+struct.pack_into("<IIIII", kdata, 0x4238e0, 0x90000008, 0xb94cd100, 0x52800029, 0xb90cd109, 0xd65f03c0)
+print("[+] Restored genuine _switch_to_video_console (cons_ops_index switched to 1 for live on-screen text)")
 
 # Patch 46: Force _oslog_is_safe (VA 0xfffffff0072d4528, file offset 0x2d0528) -> mov w0, #1; ret
 # Guarantees that _log_putc never drops characters into _oslog_msgbuf_dropped_charcount

@@ -3770,8 +3770,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	/* 1. Hardware OVL0 Layer 0 per-pixel alpha off (opaque pixels for AMOLED display) */
 	display_alpha_off();
 
-	/* 2. Authentic execution: Clear display panel to solid black for Darwin kernel & Apple userland */
-	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
+	/* 2. Flush framebuffer cache before jumping to kernel */
 	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
 
 	/* 3. Hand over console to Darwin kernel */
@@ -3794,6 +3793,7 @@ void mtkloader_main(uint64_t dtb)
 
 	wdt_disable();
 	lk_dtb = dtb;
+	display_alpha_off();
 	display_find(mark != MARK_RUNNING);
 	fbcon_init(LK_FB_BASE, LK_FB_PITCH, 240, 2);
 
