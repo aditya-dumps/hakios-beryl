@@ -46,3 +46,20 @@ Guidelines and invariants for AI agents working on booting genuine Apple iOS 16.
 11. **UFS Hardware Native DMA Mapping (No Mailbox Deadlocks)**:
     - Never allow `redwood_ufs.c` to wait on `ufs_read_mailbox` when running single-core without a dedicated hypervisor core on Core 0.
     - Always use direct hardware LUN mapping (`ufshc_set_luns(4)` for LUN 2) and patch `_ufs_request` to return `EIO` immediately rather than spinning in an infinite mailbox wait loop.
+
+12. **Open Mapple Userland Launch Invariants (`launchd` & Security Stand-ins)**:
+    - Kernel command line MUST include `unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1` to prevent XNU from aborting on `launchd` exec with `EXEC_EXIT_REASON_WRONG_PLATFORM`.
+    - Root storage mount MUST pass `mp_ufsrw=1 mp_rootrw=1` to allow read-write access to the root volume.
+    - Device Tree (ADT/FDT) MUST supply all mandatory Apple silicon stand-ins:
+      - `/defaults`: `no-effaceable-storage` (forces `keybagd` to treat `systembag.kb` as a plain plist without SEP hardware binding).
+      - `/arm-io/wdt`: `no-pmu` (prevents `watchdogd` from crashing on PMU boot stage configuration).
+      - `/buttons`: `home-button-type 2` (designates full-screen modern iPhone without home button).
+      - `/chosen/asmb`: `lp-sip0 0x6f` and `lp-sip1 1` (relaxes SIP for unsealed root filesystems).
+      - `/chosen`: `boot-manifest-hash` (SHA-384) and `crypto-hash-method sha2-384` (required for `/sbin/mount -P 1` and `cryptexd`).
+
+13. **Silent Daemon Crash Trapping (`/dev/null` Teeing)**:
+    - Add `mp_null_tee=backboardd,SpringBoard,assetsd` to `boot-args` to echo writes directed to `/dev/null` back to the live console as `|process| text`, exposing early userland initialization aborts.
+
+14. **Authentic AMOLED Backlight Initial Level Guard**:
+    - Ignore initial backlight level 0 from iOS display server before its first non-zero brightness level to prevent premature display blanking on AMOLED panels.
+

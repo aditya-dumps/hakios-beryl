@@ -79,7 +79,7 @@ static const uint16_t core_order[8] = { 0x000, 0x600, 0x700, 0x100, 0x200, 0x300
 #endif
 
 #ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin fb_flip=0 developer-mode=1 amfi_get_out_of_my_way=1"
+#define XNU_EXTRA_ARGS      "cpus=1 small_cores_after=0 ufs=2 ufs_shared_pa=0x60004000 ufs_native=1 ufs_native_spin=5000000 slide=0 vm_swapfile_create=0 root_apfs=ufs_darwin apfs_volume=ufs_darwin fb_flip=0 developer-mode=1 amfi_get_out_of_my_way=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 mp_ufsrw=1 mp_rootrw=1 mp_null_tee=backboardd,SpringBoard,assetsd fbscale=2 fbfit=3"
 #endif
 
 #define XNU_ROOT_ARG        "rd=md0"
@@ -689,6 +689,11 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_u32(&w, "nvram-current-bank", 0);
 	dt_prop(&w, "nvram-proxy-data", nvram_image, sizeof(nvram_image));
 
+	dt_begin(&w, "asmb");
+	dt_prop_u32(&w, "lp-sip0", 0x6f);
+	dt_prop_u32(&w, "lp-sip1", 1);
+	dt_end(&w);
+
 	dt_begin(&w, "memory-map");
 	uint64_t tee_reg[2] = { 0x8a000000ULL, 0x03560000ULL };
 	dt_prop(&w, "Reserved-TEE", tee_reg, sizeof(tee_reg));
@@ -718,6 +723,20 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_begin(&w, "haptics");
 	dt_identity(&w, identity_haptics, sizeof(identity_haptics) / sizeof(identity_haptics[0]), identity_haptics_data);
 	dt_end(&w);
+	dt_end(&w);
+
+	dt_begin(&w, "buttons");
+	dt_prop_str(&w, "device_type", "buttons");
+	dt_prop_u32(&w, "home-button-type", 2);
+	dt_prop_u32(&w, "opposed-power-vol-buttons", 1);
+	dt_end(&w);
+
+	dt_begin(&w, "mapple-fbcon");
+	uint64_t fbcon_reg[2] = { LK_FB_BASE, FB_SCREEN_SIZE };
+	dt_prop(&w, "reg", fbcon_reg, sizeof(fbcon_reg));
+	dt_prop_u32(&w, "width", PANEL_W);
+	dt_prop_u32(&w, "height", PANEL_H);
+	dt_prop_u32(&w, "stride", LK_FB_PITCH);
 	dt_end(&w);
 
 	dt_begin(&w, "options");
@@ -823,6 +842,19 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_end(&w); /* touch */
 
 	dt_end(&w); /* i2c0 */
+
+	dt_begin(&w, "disp0");
+	dt_prop_str(&w, "device_type", "display");
+	dt_prop_str(&w, "compatible", "mapple,display");
+	dt_prop_u32(&w, "width", 1125);
+	dt_prop_u32(&w, "height", 2436);
+	dt_end(&w);
+
+	dt_begin(&w, "wdt");
+	dt_prop_str(&w, "device_type", "wdt");
+	dt_prop_str(&w, "compatible", "mediatek,wdt");
+	dt_prop_str(&w, "no-pmu", "");
+	dt_end(&w);
 
 	dt_end(&w); /* arm-io */
 	dt_end(&w); /* device-tree */
@@ -3714,7 +3746,7 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	 */
 	wr32(TOPRGU_LENGTH, ((31u * 64u) << 5) | 0x8u);
 	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x01u);
+	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x43u | 0x01u);
 	out("watchdog armed: 31s hardware warm reset timeout for guaranteed log rescue\n");
 
 	gic_fix_eoimode();
@@ -3738,12 +3770,12 @@ static void __attribute__((noreturn)) run_xnu(int interactive)
 	/* 1. Hardware OVL0 Layer 0 per-pixel alpha off (opaque pixels for AMOLED display) */
 	display_alpha_off();
 
-	/* 2. Freeze console output from loader */
-	fbc.base = 0;
-
-	/* 3. Authentic execution: Clear display panel to solid black for Darwin kernel & Apple userland */
+	/* 2. Authentic execution: Clear display panel to solid black for Darwin kernel & Apple userland */
 	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
 	dcache_clean_range(LK_FB_BASE, FB_SCREEN_SIZE);
+
+	/* 3. Hand over console to Darwin kernel */
+	fbc.base = 0;
 
 	/* Ensure AMOLED display composition mutex is running */
 	wr32(DISP_MUTEX_EN, 1);
